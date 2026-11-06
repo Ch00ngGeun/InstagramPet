@@ -4,6 +4,9 @@
   const RESERVED = new Set(["direct", "explore", "accounts", "reels", "p", "stories", "about", "legal", "privacy", "developer", "notifications"]);
   const INCOMING = /^(?:message from|message sent by|sent by|보낸 사람|메시지를 보낸 사람)\s*[:：]?\s*(@?[a-z0-9._]{1,30})(?=\s|:|：|$)/i;
   const OUTGOING = /^(?:you(?: sent|:)|(?:message )?sent by you|message from you(?:\s|:|$)|내가 보낸|회원님이 보낸|나:)/i;
+  // Live Korean UI (verified 2026-11-06): each message's action buttons read "<username>님의 메시지에 답장하기".
+  const ACTION = /^@?([a-z0-9._]{1,30})님의 메시지에/i;
+  const ROWS = "[role='row'], [data-message-id], [data-item-id], [role='group'][tabindex='-1']";
   const UNREAD = /(?:\bunread\b|읽지 않|안 읽은|未読|未讀)/i;
   const SPACE = /\s+/g;
   function text(node) { return (node?.textContent || "").replace(SPACE, " ").trim(); }
@@ -94,6 +97,39 @@
     }
     return result;
   }
+  const EMOJI_ONLY = /^[\p{Extended_Pictographic}\p{Emoji_Component}\u200d\ufe0f\s]+$/u;
+  // Live Korean UI (2026-11-06): emoji-only bubbles have no dir=auto run; shared reels/posts are a
+  // button with thumbnail + author link, reels add an svg labelled "클립", story shares link /stories/.
+  // DM photos/videos are one button per item whose thumbnail alt names it ("사진…"/"동영상…").
+  const VIDEO_ALT = /동영상|video/i, PHOTO_ALT = /사진|photo|image|이미지/i, PROFILE_ALT = /프로필|profile/i;
+  function mediaItem(node, diagnostics) {
+    const imgs = query(node, "img", diagnostics).filter(i => !PROFILE_ALT.test(i.getAttribute("alt") || ""));
+    const alts = imgs.map(i => i.getAttribute("alt") || "");
+    // Fresh live bubbles had empty alts: a video shows a static .png play glyph over a CDN thumbnail.
+    const icon = imgs.some(i => /\.png(?:$|\?)/.test(i.getAttribute("src") || "")), thumbs = imgs.filter(i => !/\.png(?:$|\?)/.test(i.getAttribute("src") || ""));
+    if (query(node, "video", diagnostics).length || alts.some(a => VIDEO_ALT.test(a)) || (icon && thumbs.length)) return "(동영상)";
+    return alts.some(a => PHOTO_ALT.test(a)) || (!icon && thumbs.length === 1) ? "(이미지)" : null;
+  }
+  function media(body, diagnostics) {
+    // Prefer a per-item link (story/reel/post IDs), else the thumbnail, so different shares don't collapse.
+    const src = query(body, "a[href*='/stories/'], a[href*='/reel/'], a[href*='/p/']", diagnostics)[0]?.getAttribute("href") ||
+      query(body, "video[src], img[src]", diagnostics).map(n => n.getAttribute("src")).find(v => !/\.png(?:$|\?)/.test(v)) || "";
+    let key = ""; try { key = src && C.hash(new URL(src, "https://www.instagram.com").pathname); } catch { /* unusable src */ }
+    const has = selector => query(body, selector, diagnostics).length > 0;
+    if (has("svg[aria-label='클립'], svg[aria-label='Clip'], svg[aria-label='Reels'], a[href*='/reel/']")) return { label: "(릴스)", key };
+    if (has("a[href*='/stories/']")) return { label: "(스토리)", key };
+    if (has("[role='button'] img") && has("a[href]")) return { label: "(게시물)", key };
+    const items = query(body, "[role='button']", diagnostics).filter(b => !b.parentElement.closest("[role='button']")).map(b => mediaItem(b, diagnostics)).filter(Boolean);
+    const label = items.length ? items.join(" ") : mediaItem(body, diagnostics);
+    if (label) return { label, key };
+    const value = text(body);
+    return value && EMOJI_ONLY.test(value) ? { label: value, key: "" } : null;
+  }
+  function actionSender(row, diagnostics) {
+    const users = new Set(query(row, "[role='button'][aria-label]", diagnostics).map(b => label(b).match(ACTION)?.[1]).filter(Boolean).map(C.username));
+    if (users.size > 1) diagnostics.ambiguousSender++;
+    return users.size === 1 ? [...users][0] : null;
+  }
   function isOutgoing(row, config, diagnostics) {
     return OUTGOING.test(label(row)) || (config.selectors.outgoingMessage && matches(row, config.selectors.outgoingMessage, diagnostics));
   }
@@ -103,28 +139,33 @@
     const binding = config.bindings[current.id];
     const scope = config.selectors.threadRoot ? query(document, config.selectors.threadRoot, diagnostics)[0] : (document.querySelector("main") || document.querySelector("[role='main']"));
     if (!scope) return { id: current.id, url: current.url, rows: [], atBottom: false, supported: false };
-    let rows = query(scope, config.selectors.messageRow || "[role='row'], [data-message-id], [data-item-id]", diagnostics);
+    let rows = query(scope, config.selectors.messageRow || ROWS, diagnostics);
     // Avoid nested candidates and sidebar links: the deepest message row is the unit.
     const rowSet = new Set(rows);
-    rows = rows.filter(n => visible(n) && !Array.from(n.querySelectorAll("[role='row'], [data-message-id], [data-item-id]")).some(x => rowSet.has(x)));
+    rows = rows.filter(n => visible(n) && !Array.from(n.querySelectorAll(ROWS)).some(x => rowSet.has(x)));
     const occurrences = new Map(), result = [];
     for (const row of rows) {
       if (query(row, "a[href*='/direct/t/']", diagnostics).length) continue;
-      const outgoing = !!isOutgoing(row, config, diagnostics);
+      const actor = actionSender(row, diagnostics);
+      // In a user-verified 1:1 thread, an action label naming anyone but the partner is the user's own message.
+      const outgoing = !!isOutgoing(row, config, diagnostics) || (!!binding && !!actor && actor !== binding);
       const accessibleSender = label(row).match(INCOMING)?.[1];
-      const incoming = !outgoing && (!!accessibleSender || (config.selectors.incomingMessage && matches(row, config.selectors.incomingMessage, diagnostics)));
-      const sender = incoming ? resolveSender(row, binding, diagnostics, true) : null;
-      let message = "";
+      const incoming = !outgoing && (!!accessibleSender || !!actor || (config.selectors.incomingMessage && matches(row, config.selectors.incomingMessage, diagnostics)));
+      const sender = incoming ? (actor || resolveSender(row, binding, diagnostics, true)) : null;
+      let message = "", mediaKey = "";
       if (config.selectors.messageText) message = text(query(row, config.selectors.messageText, diagnostics)[0]);
       else {
-        const texts = query(row, "[dir='auto']", diagnostics).filter(n => !n.querySelector("[dir='auto']") && !n.closest("a, button, [role='button']")).map(text).filter(Boolean);
+        // The bubble body lives in role=article; names and time separators sit outside it.
+        const body = query(row, "[role='article']", diagnostics)[0] || row;
+        const texts = query(body, "[dir='auto']", diagnostics).filter(n => !n.querySelector("[dir='auto']") && !n.closest("a, button, [role='button']")).map(text).filter(Boolean);
         // Multiple text runs (e.g. message + reaction) are ambiguous; user may calibrate.
         if (texts.length === 1) message = texts[0];
+        else if (!texts.length) { const found = media(body, diagnostics); if (found) { message = found.label; mediaKey = found.key; } }
       }
       const timeNode = query(row, "time[datetime]", diagnostics)[0];
       const timestamp = timeNode?.getAttribute("datetime") || "";
       const serverId = row.getAttribute("data-message-id") || row.getAttribute("data-item-id") || "";
-      const fingerprint = C.hash([sender, outgoing ? "out" : incoming ? "in" : "unknown", message, timestamp].join("\u001f"));
+      const fingerprint = C.hash([sender, outgoing ? "out" : incoming ? "in" : "unknown", message, mediaKey, timestamp].join("\u001f"));
       const occurrence = (occurrences.get(fingerprint) || 0) + 1;
       occurrences.set(fingerprint, occurrence);
       const key = serverId ? `id:${serverId}` : `fp:${fingerprint}:${occurrence}`;
@@ -138,7 +179,10 @@
     let scroll = lastNode?.parentElement;
     while (scroll && scroll !== document.body && scroll.scrollHeight <= scroll.clientHeight + 16) scroll = scroll.parentElement;
     // An unscrollable list is already at its tail; a virtualized scroller must be at bottom.
-    const atBottom = !scroll || scroll.scrollHeight <= scroll.clientHeight + 16 || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100;
+    // Live Instagram uses a column-reverse scroller: its bottom is scrollTop 0, negative when scrolled up.
+    const reversed = !!scroll && /reverse/.test(document.defaultView?.getComputedStyle(scroll).flexDirection || "");
+    const atBottom = !scroll || scroll.scrollHeight <= scroll.clientHeight + 16 ||
+      (reversed ? Math.abs(scroll.scrollTop) < 100 : scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 100);
     for (const item of result) {
       // Without a stable item ID or machine timestamp, identical repeated rows cannot
       // be separated safely from a history prepend/virtualization shift. Suppress them.
@@ -159,7 +203,7 @@
   }
   class Tracker {
     constructor({ warmupMs = 3000 } = {}) { this.warmupMs = warmupMs; this.reset(); }
-    reset() { this.started = false; this.inbox = new Map(); this.threadId = null; this.keys = new Set(); this.lastTail = null; this.ordinal = 0; this.settleUntil = null; this.lastShape = null; }
+    reset() { this.started = false; this.inbox = new Map(); this.threadId = null; this.keys = new Set(); this.lastTail = null; this.lastHead = null; this.ordinal = 0; this.settleUntil = null; this.lastShape = null; }
     observe(snapshot, allowed, now = Date.now()) {
       const events = [], permitted = new Set(allowed);
       const shape = C.hash(JSON.stringify([snapshot.inbox.map(r => [r.thread, r.signature]), snapshot.thread?.id, snapshot.thread?.rows.map(r => r.key)]));
@@ -180,23 +224,30 @@
       if (view) {
         const changedThread = this.threadId !== view.id;
         const oldKeys = this.keys;
-        const oldTail = this.lastTail;
+        const oldTail = this.lastTail, oldHead = this.lastHead;
         this.threadId = view.id;
-        this.keys = new Set(view.rows.map(r => r.key));
-        this.lastTail = view.rows[view.rows.length - 1]?.key || null;
+        // A bubble with no readable content yet (e.g. a reel still loading its thumbnail) changes key
+        // once it hydrates; letting it be the tail would rebaseline and swallow that message.
+        const rows = view.rows.filter(r => r.text || !r.incoming);
+        this.keys = new Set(rows.map(r => r.key));
+        this.lastTail = rows[rows.length - 1]?.key || null;
+        // Occurrence-numbered keys only shift when rows are added/removed above (history load,
+        // virtualization). The same top DOM node means nothing moved above, so a repeat is genuinely new.
+        this.lastHead = rows[0]?.node || null;
+        const headStable = !!oldHead && this.lastHead === oldHead;
         if (!warming && !changedThread && this.started && oldTail && view.atBottom) {
-          const boundary = view.rows.findIndex(r => r.key === oldTail);
+          const boundary = rows.findIndex(r => r.key === oldTail);
           // If the old tail vanished (virtualization/navigation), rebaseline; never replay history.
           if (boundary >= 0) {
-            for (const row of view.rows.slice(boundary + 1)) {
-              if (oldKeys.has(row.key) || !row.incoming || row.outgoing || row.ambiguousIdentity || !row.sender || !row.text || !permitted.has(row.sender)) continue;
+            for (const row of rows.slice(boundary + 1)) {
+              if (oldKeys.has(row.key) || !row.incoming || row.outgoing || (row.ambiguousIdentity && !headStable) || !row.sender || !row.text || !permitted.has(row.sender)) continue;
               const timestamp = Date.parse(row.timestamp);
               if (Number.isFinite(timestamp) && (timestamp < now - 120000 || timestamp > now + 60000)) continue;
               events.push(this.event(row, "thread-message", row.key, now));
             }
           }
         }
-      } else { this.threadId = null; this.keys = new Set(); this.lastTail = null; }
+      } else { this.threadId = null; this.keys = new Set(); this.lastTail = null; this.lastHead = null; }
       this.started = true;
       // The same thread is often visible in sidebar and main message list; prefer full row.
       const threadIds = new Set(events.filter(e => e.kind === "thread-message").map(e => e.threadUrl));

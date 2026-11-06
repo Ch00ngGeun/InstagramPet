@@ -84,8 +84,9 @@ final class CatView: NSView {
     private var initialOrigin: NSPoint?
     private var dragged = false
     private(set) var isDragging = false
-    private let ink = NSColor(calibratedRed: 0.28, green: 0.23, blue: 0.22, alpha: 1)
-    private let fur = NSColor(calibratedRed: 0.96, green: 0.79, blue: 0.57, alpha: 1)
+    // Bundled cutout character; missing only when run outside the .app bundle.
+    private let sprite = Bundle.main.image(forResource: "pet")
+    private let pink = NSColor(calibratedRed: 0.91, green: 0.55, blue: 0.52, alpha: 1)
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -97,72 +98,22 @@ final class CatView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    private func shape(_ path: NSBezierPath, fill: NSColor, width: CGFloat = 2.5) {
-        fill.setFill(); path.fill()
-        ink.setStroke(); path.lineWidth = width; path.lineJoinStyle = .round; path.stroke()
+    /// The character's drawn area, used so transparent space stays click-through.
+    var spriteRect: NSRect {
+        guard let size = sprite?.size, size.height > 0 else { return bounds }
+        let height = bounds.height - 12, width = height * size.width / size.height
+        return NSRect(x: bounds.midX - width / 2, y: 4, width: width, height: height)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         let bob = sin(phase) * (excited ? 4 : 1.5)
-        NSGraphicsContext.saveGraphicsState()
-        let t = NSAffineTransform()
-        t.translateX(by: 0, yBy: bob)
-        t.concat()
-        NSColor(calibratedWhite: 0, alpha: 0.10).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 23, y: 7 - bob, width: 94, height: 11)).fill()
-
-        let tail = NSBezierPath()
-        tail.move(to: NSPoint(x: 105, y: 29))
-        tail.curve(to: NSPoint(x: 127, y: 69 + sin(phase * 0.8) * 4), controlPoint1: NSPoint(x: 143, y: 22), controlPoint2: NSPoint(x: 144, y: 64))
-        tail.lineWidth = 14; tail.lineCapStyle = .round; ink.setStroke(); tail.stroke()
-        tail.lineWidth = 9; fur.setStroke(); tail.stroke()
-
-        shape(NSBezierPath(roundedRect: NSRect(x: 38, y: 16, width: 70, height: 64), xRadius: 26, yRadius: 26), fill: fur)
-        shape(NSBezierPath(ovalIn: NSRect(x: 44, y: 12, width: 26, height: 15)), fill: fur)
-        shape(NSBezierPath(ovalIn: NSRect(x: 79, y: 12, width: 26, height: 15)), fill: fur)
-        NSColor(calibratedRed: 1, green: 0.90, blue: 0.73, alpha: 1).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 54, y: 25, width: 39, height: 44)).fill()
-
-        let head = NSBezierPath()
-        head.move(to: NSPoint(x: 30, y: 68))
-        head.curve(to: NSPoint(x: 29, y: 104), controlPoint1: NSPoint(x: 22, y: 80), controlPoint2: NSPoint(x: 25, y: 96))
-        head.line(to: NSPoint(x: 26, y: 126))
-        head.line(to: NSPoint(x: 49, y: 113))
-        head.curve(to: NSPoint(x: 90, y: 113), controlPoint1: NSPoint(x: 62, y: 118), controlPoint2: NSPoint(x: 76, y: 118))
-        head.line(to: NSPoint(x: 113, y: 126))
-        head.line(to: NSPoint(x: 110, y: 103))
-        head.curve(to: NSPoint(x: 110, y: 68), controlPoint1: NSPoint(x: 116, y: 88), controlPoint2: NSPoint(x: 116, y: 78))
-        head.curve(to: NSPoint(x: 30, y: 68), controlPoint1: NSPoint(x: 99, y: 43), controlPoint2: NSPoint(x: 42, y: 43))
-        head.close()
-        shape(head, fill: fur)
-        let pink = NSColor(calibratedRed: 0.91, green: 0.55, blue: 0.52, alpha: 1)
-        for x: CGFloat in [32, 99] {
-            let ear = NSBezierPath()
-            ear.move(to: NSPoint(x: x, y: 118)); ear.line(to: NSPoint(x: x + 10, y: 109)); ear.line(to: NSPoint(x: x + 1, y: 108)); ear.close()
-            pink.setFill(); ear.fill()
-        }
-        // An occasional blink gives the idle pet a subtle animation.
-        let blink = sin(phase * 0.45) > 0.992
-        for x: CGFloat in [49, 87] {
-            ink.setFill()
-            NSBezierPath(roundedRect: NSRect(x: x, y: 82, width: 5, height: blink ? 2 : 10), xRadius: 2.5, yRadius: 2.5).fill()
-        }
-        pink.withAlphaComponent(0.7).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 34, y: 72, width: 14, height: 7)).fill()
-        NSBezierPath(ovalIn: NSRect(x: 93, y: 72, width: 14, height: 7)).fill()
-        let nose = NSBezierPath()
-        nose.move(to: NSPoint(x: 66, y: 80)); nose.line(to: NSPoint(x: 73, y: 80)); nose.line(to: NSPoint(x: 69.5, y: 76)); nose.close()
-        ink.setFill(); nose.fill()
-        let mouth = NSBezierPath()
-        mouth.move(to: NSPoint(x: 61, y: 73)); mouth.curve(to: NSPoint(x: 69.5, y: 76), controlPoint1: NSPoint(x: 65, y: 69), controlPoint2: NSPoint(x: 68, y: 72))
-        mouth.curve(to: NSPoint(x: 78, y: 73), controlPoint1: NSPoint(x: 71, y: 72), controlPoint2: NSPoint(x: 75, y: 69))
-        mouth.lineWidth = 1.8; ink.setStroke(); mouth.stroke()
+        let rect = spriteRect.offsetBy(dx: 0, dy: bob)
+        sprite?.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high.rawValue])
         if excited {
             let heart: NSString = "♥"
-            heart.draw(at: NSPoint(x: 113, y: 104 + sin(phase) * 3), withAttributes: [.font: NSFont.systemFont(ofSize: 23), .foregroundColor: pink])
+            heart.draw(at: NSPoint(x: min(rect.maxX - 4, bounds.maxX - 24), y: rect.maxY - 34 + sin(phase) * 3), withAttributes: [.font: NSFont.systemFont(ofSize: 23), .foregroundColor: pink])
         }
-        NSGraphicsContext.restoreGraphicsState()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -260,7 +211,7 @@ final class PetController: NSObject, NSApplicationDelegate {
     }
 
     private func buildPanel() {
-        let size = NSSize(width: 340, height: 320)
+        let size = NSSize(width: 340, height: 530)
         let visible = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1000, height: 800)
         let origin = NSPoint(x: visible.maxX - size.width - 22, y: visible.minY + 18)
         panel = PetPanel(contentRect: NSRect(origin: origin, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -275,11 +226,11 @@ final class PetController: NSObject, NSApplicationDelegate {
         panel.animationBehavior = .none
         let content = NSView(frame: NSRect(origin: .zero, size: size))
         panel.contentView = content
-        bubble = BubbleView(frame: NSRect(x: 5, y: 147, width: 330, height: 166))
+        bubble = BubbleView(frame: NSRect(x: 5, y: 357, width: 330, height: 166))
         bubble.isHidden = true
         bubble.onClick = { [weak self] in self?.openConversation() }
         content.addSubview(bubble)
-        cat = CatView(frame: NSRect(x: 183, y: 5, width: 150, height: 140))
+        cat = CatView(frame: NSRect(x: 183, y: 5, width: 150, height: 350))
         cat.onClick = { [weak self] in self?.toggleLatest() }
         cat.onMoved = { [weak self] in self?.clampPosition(); self?.persistPosition() }
         content.addSubview(cat)
@@ -531,7 +482,7 @@ final class PetController: NSObject, NSApplicationDelegate {
     private func updateClickThrough() {
         guard !isHidden, !cat.isDragging else { return }
         let pointer = panel.convertPoint(fromScreen: NSEvent.mouseLocation)
-        let catBounds = NSRect(x: cat.frame.minX + 20, y: cat.frame.minY + 7, width: 125, height: 123)
+        let catBounds = cat.spriteRect.offsetBy(dx: cat.frame.minX, dy: cat.frame.minY)
         let overPet = catBounds.contains(pointer)
         let overBubble = !bubble.isHidden && bubble.frame.contains(pointer)
         // Transparent space must allow interaction with the application underneath.

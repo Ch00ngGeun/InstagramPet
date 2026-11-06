@@ -119,3 +119,111 @@ test('identical unkeyed history rows do not shift occurrence IDs into false new 
   const older=append(dom,{id:'',body:'Same old text',timestamp:''});dom.window.document.querySelector('#messages').prepend(older);
   assert.deepEqual(t.observe(snap(dom),['alice'],NOW+1000),[]);
 });
+// Live Korean-UI structure (2026-11-06): no role=row, IDs or <time>; sender comes from per-message action labels.
+function appendLive(dom, { user = 'fixture.sender', body = 'New live hello', extra = '' } = {}) {
+  const doc = dom.window.document, row = doc.createElement('div');
+  row.innerHTML = `<div role="group" tabindex="-1"><div><span dir="auto">Display Name</span></div><div>
+    <div><div role="article" tabindex="0"><div role="none"><span dir="auto">${body}</span>${extra}</div></div></div>
+    <div aria-label="Message actions" role="group"><div><div aria-label="${user}님의 메시지에 공감하기" role="button"></div>
+    <div aria-label="${user}님의 메시지에 답장하기" role="button"></div></div></div></div></div>`;
+  doc.getElementById('messages').append(row);
+}
+const LIVE_URL = 'https://www.instagram.com/direct/t/555/';
+const liveCfg = { allowedSenders: ['fixture.sender'], bindings: { 555: 'fixture.sender' } };
+for (const [name, config] of [['with binding', liveCfg], ['without binding', { allowedSenders: ['fixture.sender'] }]]) {
+  test(`live layout ${name}: partner message emits once, own and others do not`, () => {
+    const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'];
+    const first = snap(dom, config);
+    assert.equal(first.diagnostics.supported, true); assert.equal(first.thread.rows.length, 2);
+    assert.deepEqual(t.observe(first, allow, NOW), []);
+    appendLive(dom); const events = t.observe(snap(dom, config), allow, NOW + 1000);
+    assert.equal(events.length, 1); assert.equal(events[0].sender, 'fixture.sender'); assert.equal(events[0].text, 'New live hello'); assert.equal(events[0].threadUrl, LIVE_URL);
+    assert.deepEqual(t.observe(snap(dom, config), allow, NOW + 2000), []);
+    appendLive(dom, { user: 'fixture.me', body: 'My live reply' }); assert.deepEqual(t.observe(snap(dom, config), allow, NOW + 3000), []);
+    appendLive(dom, { user: 'fixture.other', body: 'Other person' }); assert.deepEqual(t.observe(snap(dom, config), allow, NOW + 4000), []);
+    appendLive(dom, { body: 'Shared', extra: '<div role="button"><a href="/p/x/"><span dir="auto">post</span></a></div>' });
+    assert.equal(t.observe(snap(dom, config), allow, NOW + 5000).length, 1, 'link text inside a button is ignored, body still read');
+  });
+}
+test('live layout: own message is outgoing under a binding; mixed action names fail closed', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), rows = snap(dom, liveCfg).thread.rows;
+  assert.equal(rows[0].incoming, true); assert.equal(rows[0].text, 'Old hello');
+  assert.equal(rows[1].outgoing, true); assert.equal(rows[1].sender, null);
+  const t = tracker(); t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+  appendLive(dom, { extra: '<div aria-label="fixture.other님의 메시지에 답장하기" role="button"></div>' });
+  assert.deepEqual(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000), []);
+});
+test('live layout: column-reverse scroller is at bottom at scrollTop 0, not when scrolled up', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), list = dom.window.document.getElementById('messages');
+  list.style.flexDirection = 'column-reverse';
+  Object.defineProperty(list, 'scrollHeight', { value: 2600 }); Object.defineProperty(list, 'clientHeight', { value: 700 });
+  list.scrollTop = 0; assert.equal(snap(dom, liveCfg).thread.atBottom, true);
+  Object.defineProperty(list, 'scrollTop', { value: -800, configurable: true }); assert.equal(snap(dom, liveCfg).thread.atBottom, false);
+});
+// Media bodies modelled on the live probe (reel/post/emoji verified; image/video/story provisional).
+const MEDIA = {
+  reel: n => `<div role="button"><img src="https://cdn.example/r${n}.jpg"><a href="/author.x/"><span dir="auto">author.x</span></a><svg aria-label="클립"></svg></div>`,
+  post: n => `<div><img src="https://cdn.example/a.jpg"><a href="/author.x/"><span dir="auto">author.x</span></a></div><div role="button"><img src="https://cdn.example/p${n}.jpg"><span dir="auto">caption</span></div>`,
+  image: n => `<div role="button"><img alt="사진 fixture" src="https://cdn.example/i${n}.jpg"></div>`,
+  video: n => `<div role="button"><span><img alt="" src="https://www.instagram.com/static/play.png"></span><img alt="동영상 fixture" src="https://cdn.example/v${n}.jpg"></div>`,
+  mixed: n => MEDIA.image(n) + MEDIA.video(n),
+  freshImage: n => `<div role="button"><img alt="" src="https://cdn.example/fi${n}.jpg"></div>`,
+  freshVideo: n => `<div role="button"><span><img alt="" src="https://www.instagram.com/static/play.png"></span><img alt="" src="https://cdn.example/fv${n}.jpg"></div>`,
+  story: n => `<div role="button"><a href="/stories/author.x/${n}/"><img src="https://cdn.example/s${n}.jpg"></a></div>`,
+};
+test('live layout: media and emoji-only messages get readable labels', () => {
+  const expected = { reel: '(릴스)', post: '(게시물)', image: '(이미지)', video: '(동영상)', story: '(스토리)', mixed: '(이미지) (동영상)', freshImage: '(이미지)', freshVideo: '(동영상)' };
+  for (const [type, html] of Object.entries(MEDIA)) {
+    const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(); t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+    appendLive(dom, { body: '', extra: html(1) }); dom.window.document.querySelector('#messages > div:last-child span[dir="auto"]:not(a span)')?.remove();
+    const events = t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000);
+    assert.equal(events.length, 1, type); assert.equal(events[0].text, expected[type], type);
+  }
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(); t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+  appendLive(dom, { body: '', extra: '<span>❤️</span>' }); dom.window.document.querySelector('#messages > div:last-child [role="article"] span[dir="auto"]').remove();
+  assert.equal(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000)[0]?.text, '❤️');
+});
+test('live layout: two different reels both emit; own media does not', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), strip = () => dom.window.document.querySelector('#messages > div:last-child [role="article"] > div > span[dir="auto"]').remove();
+  t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+  appendLive(dom, { body: '', extra: MEDIA.reel(1) }); strip(); assert.equal(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000).length, 1);
+  appendLive(dom, { body: '', extra: MEDIA.reel(2) }); strip(); assert.equal(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 2000).length, 1);
+  appendLive(dom, { user: 'fixture.me', body: '', extra: MEDIA.image(3) }); strip(); assert.deepEqual(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 3000), []);
+});
+test('live layout: unrecognised media fails closed instead of guessing', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(); t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+  appendLive(dom, { body: '', extra: '<div role="button"><img alt="" src="https://cdn.example/u1.jpg"><img alt="" src="https://cdn.example/u2.jpg"></div>' });
+  assert.deepEqual(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000), []);
+});
+test('live layout: two story shares with the same thumbnail but different story IDs both emit', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(); t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+  const story = id => `<div role="button"><a href="/stories/author.x/${id}/"><img src="https://cdn.example/same.jpg"></a></div>`;
+  appendLive(dom, { body: '', extra: story(1) }); assert.equal(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000).length, 1);
+  appendLive(dom, { body: '', extra: story(2) }); assert.equal(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 2000).length, 1);
+});
+test('live layout: a reel that hydrates after first render still emits once', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(); t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+  appendLive(dom, { body: '', extra: '<div role="button" id="loading"></div>' });
+  assert.deepEqual(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000), [], 'empty bubble is not announced');
+  dom.window.document.getElementById('loading').outerHTML = MEDIA.reel(9);
+  const events = t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 2000);
+  assert.equal(events.length, 1); assert.equal(events[0].text, '(릴스)');
+  assert.deepEqual(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 3000), []);
+});
+test('live layout: the same reel or emoji sent again emits again; one tracker never repeats it', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'];
+  const strip = () => dom.window.document.querySelector('#messages > div:last-child [role="article"] > div > span[dir="auto"]').remove();
+  t.observe(snap(dom, liveCfg), allow, NOW);
+  const ids = [];
+  for (let i = 1; i <= 2; i++) { appendLive(dom, { body: '', extra: MEDIA.reel(7) }); strip(); const e = t.observe(snap(dom, liveCfg), allow, NOW + i * 1000); assert.equal(e.length, 1, `reel #${i}`); ids.push(e[0].eventId); }
+  assert.notEqual(ids[0], ids[1]);
+  assert.deepEqual(t.observe(snap(dom, liveCfg), allow, NOW + 5000), []);
+  appendLive(dom, { body: 'ㅋㅋ' }); appendLive(dom, { body: 'ㅋㅋ' });
+  assert.equal(t.observe(snap(dom, liveCfg), allow, NOW + 6000).length, 2, 'two identical texts arriving together');
+});
+test('live layout: an identical repeat is suppressed when history shifts above it', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'], list = dom.window.document.getElementById('messages');
+  appendLive(dom, { body: 'same' }); t.observe(snap(dom, liveCfg), allow, NOW);
+  list.firstElementChild.remove(); appendLive(dom, { body: 'same' });
+  assert.deepEqual(t.observe(snap(dom, liveCfg), allow, NOW + 1000), []);
+});

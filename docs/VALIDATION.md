@@ -6,7 +6,7 @@
 
 | 대상 | 실행 | 결과 |
 | --- | --- | --- |
-| Chrome 확장 프로그램 | `cd extension && npm test` | **30/30 통과** |
+| Chrome 확장 프로그램 | `cd extension && npm test` | **42/42 통과** (실계정 구조 기반 fixture·프로브 개인정보 검사 포함) |
 | 공유 Swift 모델·큐·프레이밍 | `cd macos && swift run PetCoreChecks` | **8/8 검사 그룹 통과** |
 | 실제 Swift Native Messaging 실행 파일 | `./scripts/test-native.py` | **6/6 통과** |
 | 임시 경로에서 설치·갱신·제거 | `./scripts/test-install.py` | **4/4 통과** |
@@ -26,11 +26,27 @@ Native Messaging 검사는 실제 호스트 프로세스의 표준 입력/출력
 
 앱 smoke test는 임시 큐에 실제 Swift 호스트가 이벤트를 수락한 뒤, 앱의 실제 시작·poll·present·consume 경로를 실행합니다. 창과 메뉴 아이콘을 표시하지 않고 `displayedEventId`, `bubbleVisible`, `remainingQueueCount`를 확인했습니다. 이는 로컬 Swift 전달 경로 검증입니다.
 
+## 실계정 검증 (2026-11-06, Chrome 157, Instagram 한국어 UI)
+
+자동 테스트와 별개로, 사용자의 실제 Chrome·로그인된 Instagram에서 수행했습니다. 본문·계정명은 기록하지 않았습니다.
+
+| 단계 | 결과 |
+| --- | --- |
+| unpacked 확장 로드, `install.sh <ID>`, **Check bridge**/**Send test bubble** | 성공 (사용자가 말풍선 확인) |
+| 기존 adapter로 실제 DM 페이지 | **실패**: `role=row`·메시지 ID·`time` 없음 → `unsupported-dom`, 메시지 목록이 `column-reverse` 라 `atBottom` 오판 |
+| 수정 adapter, 열린 1:1 대화에서 상대 계정이 새로 보낸 메시지 | 텍스트·사진 `(이미지)`·동영상 `(동영상)`·게시물 `(게시물)`·스토리 `(스토리)`·이모지 **수신 성공** (호스트 수락 기록과 사용자 확인 일치) |
+| 본인 답장 | 표시 안 됨 (정상) |
+| 릴스 `(릴스)` | 1회 성공, 1회 누락 → 로딩 중 빈 말풍선이 기준 상태를 흔든 문제 수정. 수정본에서 **수신 성공** (2026-11-07) |
+| 같은 릴스 재전송 | 수정본에서 **수신 성공** (2026-11-07). 같은 문구 재전송은 자동 테스트만 |
+| 허용 계정 2개 (계정별 1:1 대화 탭 각 1개) | 두 번째 계정에서 텍스트·릴스·같은 릴스 재전송·다른 릴스 4건 **수신 성공**: 호스트 수락 기록 4건과 사용자 확인 일치 (2026-11-07) |
+| 상시 수신 설정 | 펫 앱·Chrome 로그인 항목, Chrome 이전 탭 복원, `instagram.com` 메모리 절약 예외, 전원 연결 시 잠자기 방지 설정 확인. **재시동 후 자동 복원은 미검증** |
+
+실제 DOM 구조 근거와 한계는 [DOM-DRIFT.md](DOM-DRIFT.md)의 "2026-11 실측 구조"를 참고하세요.
+
 ## 검증하지 않은 범위
 
-- 실제 Chrome에서 unpacked extension을 로드해 Native Messaging 호스트에 연결하는 수동 단계. 설정의 **Check bridge**, **Send test bubble**로 확인해야 합니다.
-- 로그인된 Instagram 계정에서 현재 배포 중인 실제 DOM을 읽어 새 DM을 수신하는 시험. fixture는 모두 합성 HTML입니다.
-- 실제 사용자의 수신·발신·다른 발신자 필터, 반복 텍스트, 읽지 않은 미리보기, 다국어/A·B 화면에 대한 정확도.
+- 위 실계정 검증 외의 환경: 다른 계정·다른 Chrome 버전·한국어 외 UI·A/B 화면. 자동 테스트 fixture는 합성 HTML입니다.
+- 허용 목록에 없는 다른 발신자의 실수신 거부, 같은 문구 재전송의 실수신, 읽지 않은 미리보기(inbox) 감지(현재 미지원).
 - 드래그·대화 클릭·숨김·일시정지 등 상호작용의 수동 사용성 시험, 모든 Spaces/전체 화면 앱/멀티 모니터 환경.
 - 장시간 백그라운드 렌더링, Chrome 메모리 절약 탭 폐기, 네트워크 단절, 잠자기 복귀.
 - Intel Mac, macOS 13~25에서의 실제 실행. 소스의 배포 대상은 macOS 13 이상이나 포함된 바이너리는 이 arm64 환경에서 빌드했습니다.

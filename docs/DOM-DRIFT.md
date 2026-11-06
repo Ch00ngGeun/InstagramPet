@@ -14,6 +14,20 @@ Instagram은 이 확장 프로그램을 위한 안정적인 DM DOM 계약을 제
 
 Chrome은 content script가 페이지 DOM을 읽을 수 있도록 하고, `matches`에 맞는 페이지에 정적으로 삽입합니다. 이 범위가 닫힌 페이지의 메시지 수신까지 확장되지는 않습니다. [Chrome content scripts](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts)
 
+## 2026-11 실측 구조 (한국어 UI)
+
+`scripts/dom-probe.js`(텍스트·계정명·ID·클래스를 제거한 구조만 출력)로 확인한 내용입니다. fixture는 `extension/tests/fixtures/thread-live-2026-11.html`.
+
+- 메시지 단위: `div[role=group][tabindex=-1]`, 본문은 그 안의 `div[role=article]`. 메시지 ID·`<time>` 없음.
+- 발신자: 메시지마다 붙은 액션 버튼 `aria-label="<username>님의 메시지에 답장하기"`. 본인 메시지는 본인 username. 검증된 1:1 binding이 있으면 다른 이름은 본인 발신으로 처리.
+- 목록 스크롤: `flex-direction: column-reverse`, 맨 아래가 `scrollTop 0`.
+- 이모지만 보낸 메시지: `dir=auto` 없는 `<span>`.
+- 릴스: 버튼 안 썸네일 + 작성자 링크 + `svg[aria-label="클립"]`. 게시물: 버튼 안 이미지 + 작성자 링크. 스토리: `/stories/` 링크.
+- 사진·동영상: 항목마다 버튼 1개. 오래된 말풍선은 썸네일 `alt`에 `사진`/`동영상`, 갓 도착한 말풍선은 `alt`가 비어 있고 동영상에만 `.png` 재생 아이콘이 붙음. 스티커·GIF가 `(이미지)`로 보일 수 있음.
+- inbox 목록: `/direct/t/` 링크가 없어 **inbox 미리보기 감지는 현재 동작하지 않습니다.** 감지하려는 1:1 대화를 탭에 열어 두어야 하며, 계정마다 해당 대화 탭이 하나씩 필요합니다.
+- 같은 내용 반복: 메시지 목록 맨 위 DOM 노드가 그대로일 때만 새 메시지로 인정. 과거 내역 로드·가상화로 위쪽이 바뀌는 순간 도착한 반복 메시지는 놓칠 수 있습니다. 같은 대화를 두 탭에서 열면 반복 메시지가 두 번 표시될 수 있습니다.
+- 다른 언어 UI의 레이블(`님의 메시지에`, `클립`, `사진`, `동영상`)은 확인하지 않았습니다.
+
 ## 실패를 구분하는 순서
 
 1. 확장 프로그램의 연결 확인과 테스트 메시지를 실행합니다. 여기서 실패하면 DOM보다 호스트 등록·앱 실행을 먼저 확인합니다.
