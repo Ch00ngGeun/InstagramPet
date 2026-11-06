@@ -59,6 +59,13 @@ async function handle(message, sender) {
       queue.flush().catch(() => {});
       return answer;
     }
+    if (message.type === "pet.read") {
+      // Only the thread the sending tab is actually showing can be marked read.
+      const thread = PetCommon.threadURL(message.threadUrl), here = PetCommon.threadURL(sender.url);
+      if (!thread || !here || thread.url !== here.url) throw new Error("Read requires its own thread page");
+      await queue.exclusive(() => nativeRequest({ version: 1, type: "read", threadUrl: thread.url }));
+      return { ok: true };
+    }
     if (message.type === "pet.diagnostics") {
       const info = message.info || {};
       const validStates = ["disabled", "no-allowlist", "open-dm-page", "invalid-selector", "observing", "unsupported-dom"];
@@ -95,8 +102,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep the callback channel open, including Chrome before Promise responses.
 });
 function ensureAlarm() { chrome.alarms.create("pet-retry", { periodInMinutes: 1 }); }
-chrome.runtime.onInstalled.addListener(() => { ensureAlarm(); queue.flush().catch(() => {}); });
+// A reload orphans content scripts in already-open tabs; re-inject so they keep observing without a tab refresh.
+async function reinject() {
+  const { js, matches } = chrome.runtime.getManifest().content_scripts[0];
+  for (const tab of await chrome.tabs.query({ url: matches }))
+    chrome.scripting.executeScript({ target: { tabId: tab.id }, files: js }).catch(() => {});
+}
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  ensureAlarm(); queue.flush().catch(() => {});
+  if (reason === "install" || reason === "update") reinject().catch(() => {}); // chrome_update: declared scripts are still alive
+});
 chrome.runtime.onStartup.addListener(() => { ensureAlarm(); queue.flush().catch(() => {}); });
+// Clicking a pet bubble opens the thread in a new tab. If that thread is already open, switch to the
+// existing tab instead: a second copy of the same thread would show repeated messages twice.
+const freshTabs = new Map();
+chrome.tabs.onCreated.addListener(tab => { freshTabs.set(tab.id, Date.now()); });
+chrome.tabs.onRemoved.addListener(tabId => { freshTabs.delete(tabId); });
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  const thread = change.url && PetCommon.threadURL(change.url);
+  if (!thread || !(Date.now() - (freshTabs.get(tabId) || 0) < 10000)) return;
+  chrome.tabs.query({ url: chrome.runtime.getManifest().content_scripts[0].matches }).then(async tabs => {
+    const older = tabs.find(t => t.id !== tabId && PetCommon.threadURL(t.url || "")?.id === thread.id);
+    if (!older) return;
+    freshTabs.delete(tabId);
+    await chrome.tabs.update(older.id, { active: true });
+    await chrome.windows.update(older.windowId, { focused: true });
+    await chrome.tabs.remove(tabId);
+  }).catch(() => {});
+});
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "pet-retry") queue.flush().catch(() => {}); });
 chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes.settings) queue.flush().catch(() => {}); });
 ensureAlarm();

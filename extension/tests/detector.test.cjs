@@ -221,9 +221,34 @@ test('live layout: the same reel or emoji sent again emits again; one tracker ne
   appendLive(dom, { body: 'ㅋㅋ' }); appendLive(dom, { body: 'ㅋㅋ' });
   assert.equal(t.observe(snap(dom, liveCfg), allow, NOW + 6000).length, 2, 'two identical texts arriving together');
 });
-test('live layout: an identical repeat is suppressed when history shifts above it', () => {
+test('live layout: a repeat that arrives while Instagram drops the oldest row (20-row window) still emits', () => {
+  // This used to be swallowed: dropping the head renumbered the repeated content, so the new row looked old.
   const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'], list = dom.window.document.getElementById('messages');
   appendLive(dom, { body: 'same' }); t.observe(snap(dom, liveCfg), allow, NOW);
   list.firstElementChild.remove(); appendLive(dom, { body: 'same' });
+  const events = t.observe(snap(dom, liveCfg), allow, NOW + 1000);
+  assert.deepEqual(events.map(e => e.text), ['same']);
+});
+test('live layout: identical history loaded above the old tail never emits', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'], list = dom.window.document.getElementById('messages');
+  appendLive(dom, { body: 'same' }); t.observe(snap(dom, liveCfg), allow, NOW);
+  list.prepend(list.lastElementChild.cloneNode(true)); // scrolled-up history: same content, above the tail
   assert.deepEqual(t.observe(snap(dom, liveCfg), allow, NOW + 1000), []);
+});
+test('live layout: the same text sent again later gets a new event ID, so dedup never drops it', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'], list = dom.window.document.getElementById('messages');
+  t.observe(snap(dom, liveCfg), allow, NOW);
+  appendLive(dom, { body: 'ㅋㅋ' }); const first = t.observe(snap(dom, liveCfg), allow, NOW + 1000);
+  list.firstElementChild.remove(); // the oldest row leaves Instagram's window
+  appendLive(dom, { body: 'ㅋㅋ' }); const second = t.observe(snap(dom, liveCfg), allow, NOW + 60000);
+  assert.equal(first.length, 1); assert.equal(second.length, 1);
+  assert.notEqual(first[0].eventId, second[0].eventId);
+});
+test('live layout: several messages found in one scan keep their on-screen order', () => {
+  const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker();
+  t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
+  for (const body of ['first', 'second', 'third']) appendLive(dom, { body });
+  const events = t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000);
+  // The app sorts by observedAt with eventId (a hash) as tie-break, so times must be strictly increasing.
+  assert.deepEqual([...events].sort((a, b) => a.observedAt.localeCompare(b.observedAt) || a.eventId.localeCompare(b.eventId)).map(e => e.text), ['first', 'second', 'third']);
 });

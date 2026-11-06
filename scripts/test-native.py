@@ -77,6 +77,18 @@ class NativeBridgeTests(unittest.TestCase):
         self.assertEqual(unpack(replay.stdout)[0]['type'], 'ack')
         self.assertEqual(len(list((self.root / 'inbox').glob('*.json'))), 0)
 
+    def test_read_mark_clears_that_threads_pending_messages(self):
+        thread = 'https://www.instagram.com/direct/t/123/'
+        result = self.run_host(frame(self.event()) + frame(self.event(eventId='other', threadUrl='https://www.instagram.com/direct/t/999/'))
+                               + frame({'version': 1, 'type': 'read', 'threadUrl': thread})
+                               + frame({'version': 1, 'type': 'read', 'threadUrl': 'https://evil.test/direct/t/1/'}))
+        self.assertEqual([x['type'] for x in unpack(result.stdout)], ['ack', 'ack', 'ack', 'error'])
+        left = [json.loads(f.read_text())['eventId'] for f in (self.root / 'inbox').glob('*.json')]
+        self.assertEqual(left, ['other'])
+        marks = [json.loads(f.read_text()) for f in (self.root / 'reads').glob('*.json')]
+        self.assertEqual([m['threadUrl'] for m in marks], [thread])
+        self.assertNotIn('PRIVATE_CANARY', json.dumps(marks))
+
     def test_rejections_do_not_poison_next_frame_or_log_private_data(self):
         requests = [self.event(threadUrl='https://evil.example/'), self.event(sender='Alice Smith'),
                     self.event(eventId='../../bad'), self.event(text=''), self.event(sender='alice\n'),

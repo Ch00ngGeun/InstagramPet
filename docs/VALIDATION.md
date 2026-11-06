@@ -6,7 +6,7 @@
 
 | 대상 | 실행 | 결과 |
 | --- | --- | --- |
-| Chrome 확장 프로그램 | `cd extension && npm test` | **42/42 통과** (실계정 구조 기반 fixture·프로브 개인정보 검사 포함) |
+| Chrome 확장 프로그램 | `cd extension && npm test` | **43/43 통과** (실계정 구조 기반 fixture·프로브 개인정보 검사 포함) |
 | 공유 Swift 모델·큐·프레이밍 | `cd macos && swift run PetCoreChecks` | **8/8 검사 그룹 통과** |
 | 실제 Swift Native Messaging 실행 파일 | `./scripts/test-native.py` | **6/6 통과** |
 | 임시 경로에서 설치·갱신·제거 | `./scripts/test-install.py` | **4/4 통과** |

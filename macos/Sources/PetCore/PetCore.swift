@@ -39,13 +39,15 @@ public struct PetEvent: Codable, Equatable {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               text.count <= 2000, !text.contains("\0") else { throw PetError.invalid("text") }
         guard (displayName?.count ?? 0) <= 100 else { throw PetError.invalid("displayName") }
-        guard Self.matches(threadUrl, "^https://www\\.instagram\\.com/direct/t/[A-Za-z0-9_-]{1,128}/$") else {
-            throw PetError.invalid("thread URL")
-        }
+        guard Self.isThreadURL(threadUrl) else { throw PetError.invalid("thread URL") }
         guard ["thread-message", "inbox-preview", "test"].contains(kind) else { throw PetError.invalid("kind") }
         guard let timestamp = Self.date(observedAt), timestamp.timeIntervalSinceNow <= 300 else {
             throw PetError.invalid("timestamp (ISO8601, no more than 5 minutes in the future)")
         }
+    }
+
+    public static func isThreadURL(_ value: String) -> Bool {
+        matches(value, "^https://www\\.instagram\\.com/direct/t/[A-Za-z0-9_-]{1,128}/$")
     }
 
     public static func date(_ value: String) -> Date? {
@@ -71,6 +73,8 @@ public struct PetPaths {
     public let root: URL
     public var inbox: URL { root.appendingPathComponent("inbox", isDirectory: true) }
     public var receipts: URL { root.appendingPathComponent("receipts", isDirectory: true) }
+    /// "Read" marks: one content-free file per thread the user looked at in Chrome.
+    public var reads: URL { root.appendingPathComponent("reads", isDirectory: true) }
     public var config: URL { root.appendingPathComponent("config.json") }
 
     public init(root: URL? = nil) {
@@ -82,7 +86,7 @@ public struct PetPaths {
     }
 
     public func prepare() throws {
-        for directory in [root, inbox, receipts] {
+        for directory in [root, inbox, receipts, reads] {
             var info = stat()
             if lstat(directory.path, &info) == 0 {
                 guard (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == getuid() else {
@@ -167,6 +171,35 @@ public final class EventQueue {
         }
     }
 
+    /// The user saw this thread in Chrome: remember when, and drop its not-yet-shown messages up to then.
+    public func markRead(threadUrl: String, at date: Date = Date()) throws {
+        guard PetEvent.isThreadURL(threadUrl) else { throw PetError.invalid("thread URL") }
+        try locked {
+            let mark = try JSONSerialization.data(withJSONObject: ["threadUrl": threadUrl, "readAt": PetEvent.timestamp(date)], options: [.sortedKeys])
+            try atomicProtectedWrite(mark, to: paths.reads.appendingPathComponent(digest(threadUrl) + ".json"))
+            for url in try jsonFiles(paths.inbox) {
+                guard let event = try? JSONDecoder().decode(PetEvent.self, from: protectedRead(url)),
+                      event.threadUrl == threadUrl, let observed = PetEvent.date(event.observedAt), observed <= date else { continue }
+                try fileManager.removeItem(at: url)
+            }
+        }
+    }
+
+    /// Latest read time per thread URL, within the 24h retention.
+    public func reads() throws -> [String: Date] {
+        try locked {
+            try cleanup()
+            var result: [String: Date] = [:]
+            for url in try jsonFiles(paths.reads) {
+                guard let object = (try? JSONSerialization.jsonObject(with: protectedRead(url))) as? [String: Any],
+                      let thread = object["threadUrl"] as? String, PetEvent.isThreadURL(thread),
+                      let at = (object["readAt"] as? String).flatMap(PetEvent.date) else { try? fileManager.removeItem(at: url); continue }
+                result[thread] = max(at, result[thread] ?? .distantPast)
+            }
+            return result
+        }
+    }
+
     public func count() throws -> Int { try locked { try cleanup(); return try jsonFiles(paths.inbox).count } }
 
     /// Removes pending message content. Retains content-free receipts to suppress retries.
@@ -218,12 +251,13 @@ public final class EventQueue {
         let now = Date()
         guard now.timeIntervalSince(lastCleanup) >= 30 else { return }
         lastCleanup = now
-        for directory in [paths.inbox, paths.receipts] {
+        for directory in [paths.inbox, paths.receipts, paths.reads] {
             for url in try jsonFiles(directory) {
                 do {
                     let data = try protectedRead(url)
                     let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    let timestamp = object?[directory == paths.inbox ? "observedAt" : "acceptedAt"] as? String
+                    let key = directory == paths.inbox ? "observedAt" : directory == paths.reads ? "readAt" : "acceptedAt"
+                    let timestamp = object?[key] as? String
                     guard let timestamp, let date = PetEvent.date(timestamp), now.timeIntervalSince(date) <= Self.retention else {
                         try fileManager.removeItem(at: url); continue
                     }

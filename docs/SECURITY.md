@@ -10,6 +10,7 @@
 - `nativeMessaging`: 설치한 Swift 호스트와 Chrome의 표준 통신.
 - 재시도용 `alarms`가 선언되어 있다면 그 용도는 로컬 대기 이벤트 재전송이며 Instagram 조회가 아닙니다.
 - `content_scripts.matches`: HTTPS `instagram.com`과 `www.instagram.com`에만 삽입. 페이지 안에서 경로를 추가 검사합니다.
+- `scripting` + 같은 두 주소의 `host_permissions`: 확장을 다시 로드하거나 업데이트할 때 이미 열린 Instagram 탭에 같은 content script를 다시 넣는 용도로만 씁니다. 대상 사이트는 늘어나지 않습니다.
 
 전체 웹사이트, Chrome 쿠키, 방문 기록, 접근성, 화면 녹화, 전체 디스크 접근 권한은 이 기능에 필요하지 않습니다. 권한과 웹사이트 범위를 최소화하는 것은 Chrome의 권장 방식입니다. [Chrome permissions](https://developer.chrome.com/docs/extensions/develop/concepts/declare-permissions), [Chrome extension security](https://developer.chrome.com/docs/extensions/develop/security-privacy/stay-secure)
 

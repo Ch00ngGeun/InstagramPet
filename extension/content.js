@@ -2,7 +2,7 @@
   "use strict";
   const C = PetCommon, D = PetDetector;
   const tracker = new D.Tracker(), outbox = new Map();
-  let config = C.settings(), timer = null, lastPath = "", lastScan = 0, stopped = false, lastDiagnostic = 0, running = false, rerun = false;
+  let readSent = false, config = C.settings(), timer = null, lastPath = "", lastScan = 0, stopped = false, lastDiagnostic = 0, running = false, rerun = false;
   const metadata = { scans: 0, observations: 0, sendErrors: 0, dropped: 0 };
   function send(message) {
     return new Promise(resolve => {
@@ -36,6 +36,7 @@
         for (const event of tracker.observe(snapshot, config.allowedSenders, now)) {
           metadata.observations++;
           outbox.set(event.eventId, event);
+          readSent = false; // a new message while the user is looking at this thread is read too
         }
         while (outbox.size > 50) { outbox.delete(outbox.keys().next().value); metadata.dropped++; }
         for (const [id, event] of outbox) {
@@ -46,6 +47,11 @@
           else break;
         }
       } else { tracker.reset(); outbox.clear(); }
+      // The user is looking at this thread in a focused window: its pet bubbles can go away.
+      const thread = C.threadURL(location.href);
+      if (config.enabled && thread && document.visibilityState === "visible" && document.hasFocus()) {
+        if (!readSent) { readSent = true; if (!(await send({ type: "pet.read", threadUrl: thread.url }))?.ok) readSent = false; }
+      } else readSent = false;
       if (now - lastDiagnostic > 5000) {
         lastDiagnostic = now;
         const state = !config.enabled ? "disabled" : !config.allowedSenders.length ? "no-allowlist" : !onDirect ? "open-dm-page" : diagnostics.invalidSelector ? "invalid-selector" : diagnostics.supported ? "observing" : "unsupported-dom";
@@ -60,6 +66,9 @@
   const poll = setInterval(schedule, 5000); // SPA navigation and missed renderer updates; Chrome may throttle this.
   addEventListener("pageshow", event => { if (event.persisted) tracker.reset(); schedule(); });
   addEventListener("pagehide", () => tracker.reset());
+  addEventListener("focus", schedule);
+  addEventListener("blur", schedule);
+  document.addEventListener("visibilitychange", schedule);
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.settings) { config = C.settings(changes.settings.newValue); tracker.reset(); outbox.clear(); schedule(); }
   });

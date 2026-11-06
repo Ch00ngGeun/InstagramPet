@@ -84,6 +84,11 @@ do {
                 try response(["version": 1, "type": "ack", "eventId": event.eventId, "ok": true, "queued": true])
                 // A retry of an accepted event need not re-open the app after the user has quit it.
                 if isNew { launchPetIfConfigured() }
+            } else if type == "read" {
+                // Only a validated thread URL is stored; the host's own clock decides what counts as read.
+                guard let thread = request["threadUrl"] as? String, PetEvent.isThreadURL(thread) else { throw PetError.invalid("thread URL") }
+                try queue.markRead(threadUrl: thread)
+                try response(["version": 1, "type": "ack", "ok": true])
             } else { throw PetError.invalid("unsupported request type") }
         } catch {
             // Never echo untrusted JSON, sender, URL, message text, or decoder diagnostics.

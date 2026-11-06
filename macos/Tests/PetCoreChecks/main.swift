@@ -25,6 +25,18 @@ func isolatedQueue(_ body: (EventQueue) throws -> Void) throws {
 }
 
 let checks: [(String, () throws -> Void)] = [
+    ("read marks drop that thread's earlier pending messages only", {
+        try isolatedQueue { queue in
+            let other = "https://www.instagram.com/direct/t/999/"
+            try queue.enqueue(event("old", at: Date().addingTimeInterval(-60)))
+            try queue.enqueue(event("other", url: other, at: Date().addingTimeInterval(-60)))
+            try queue.markRead(threadUrl: "https://www.instagram.com/direct/t/123/")
+            try queue.enqueue(event("new", at: Date().addingTimeInterval(1)))
+            try check(Set(try queue.pending().map(\.eventId)) == ["other", "new"], "read thread kept old message")
+            try check(try queue.reads()["https://www.instagram.com/direct/t/123/"] != nil, "read mark missing")
+            try rejects { try queue.markRead(threadUrl: "https://evil.test/direct/t/1/") }
+        }
+    }),
     ("URL, sender, text, event ID and timestamp validation", {
         try event().validate()
         try rejects { try event("bad-id\n").validate() }

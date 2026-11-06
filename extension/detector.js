@@ -203,7 +203,7 @@
   }
   class Tracker {
     constructor({ warmupMs = 3000 } = {}) { this.warmupMs = warmupMs; this.reset(); }
-    reset() { this.started = false; this.inbox = new Map(); this.threadId = null; this.keys = new Set(); this.lastTail = null; this.lastHead = null; this.ordinal = 0; this.settleUntil = null; this.lastShape = null; }
+    reset() { this.started = false; this.inbox = new Map(); this.threadId = null; this.keys = new Set(); this.lastTail = null; this.lastHead = null; this.lastTailNode = null; this.ordinal = 0; this.settleUntil = null; this.lastShape = null; }
     observe(snapshot, allowed, now = Date.now()) {
       const events = [], permitted = new Set(allowed);
       const shape = C.hash(JSON.stringify([snapshot.inbox.map(r => [r.thread, r.signature]), snapshot.thread?.id, snapshot.thread?.rows.map(r => r.key)]));
@@ -224,18 +224,31 @@
       if (view) {
         const changedThread = this.threadId !== view.id;
         const oldKeys = this.keys;
-        const oldTail = this.lastTail, oldHead = this.lastHead;
+        const oldTail = this.lastTail, oldHead = this.lastHead, oldTailNode = this.lastTailNode;
         this.threadId = view.id;
         // A bubble with no readable content yet (e.g. a reel still loading its thumbnail) changes key
         // once it hydrates; letting it be the tail would rebaseline and swallow that message.
         const rows = view.rows.filter(r => r.text || !r.incoming);
         this.keys = new Set(rows.map(r => r.key));
         this.lastTail = rows[rows.length - 1]?.key || null;
+        this.lastTailNode = rows[rows.length - 1]?.node || null;
         // Occurrence-numbered keys only shift when rows are added/removed above (history load,
         // virtualization). The same top DOM node means nothing moved above, so a repeat is genuinely new.
         this.lastHead = rows[0]?.node || null;
         const headStable = !!oldHead && this.lastHead === oldHead;
-        if (!warming && !changedThread && this.started && oldTail && view.atBottom) {
+        // Instagram keeps only ~20 rows and drops the oldest as new ones arrive, which renumbers repeated
+        // content. When the previous tail's own DOM node is still here, everything after it was appended:
+        // new, whatever its text — no occurrence numbers involved.
+        const tailAt = oldTailNode ? rows.findIndex(r => r.node === oldTailNode) : -1;
+        if (!warming && !changedThread && this.started && view.atBottom && tailAt >= 0) {
+          for (const row of rows.slice(tailAt + 1)) {
+            if (!row.incoming || row.outgoing || !row.sender || !row.text || !permitted.has(row.sender)) continue;
+            const timestamp = Date.parse(row.timestamp);
+            if (Number.isFinite(timestamp) && (timestamp < now - 120000 || timestamp > now + 60000)) continue;
+            events.push(this.event(row, "thread-message", row.key, now + events.length));
+          }
+        } else if (!warming && !changedThread && this.started && oldTail && view.atBottom) {
+          // The tail node was replaced (re-render/navigation): fall back to content keys, conservatively.
           const boundary = rows.findIndex(r => r.key === oldTail);
           // If the old tail vanished (virtualization/navigation), rebaseline; never replay history.
           if (boundary >= 0) {
@@ -243,20 +256,24 @@
               if (oldKeys.has(row.key) || !row.incoming || row.outgoing || (row.ambiguousIdentity && !headStable) || !row.sender || !row.text || !permitted.has(row.sender)) continue;
               const timestamp = Date.parse(row.timestamp);
               if (Number.isFinite(timestamp) && (timestamp < now - 120000 || timestamp > now + 60000)) continue;
-              events.push(this.event(row, "thread-message", row.key, now));
+              // +index ms: rows found in one scan keep DOM order; the app sorts by observedAt, ties by hash.
+              events.push(this.event(row, "thread-message", row.key, now + events.length));
             }
           }
         }
-      } else { this.threadId = null; this.keys = new Set(); this.lastTail = null; this.lastHead = null; }
+      } else { this.threadId = null; this.keys = new Set(); this.lastTail = null; this.lastHead = null; this.lastTailNode = null; }
       this.started = true;
       // The same thread is often visible in sidebar and main message list; prefer full row.
       const threadIds = new Set(events.filter(e => e.kind === "thread-message").map(e => e.threadUrl));
       return events.filter(e => e.kind !== "inbox-preview" || !threadIds.has(e.threadUrl));
     }
     event(row, kind, identity, now) {
+      // Content keys (no server ID) repeat whenever the same text is sent again later; the observation time
+      // makes each real arrival its own event, so worker/host deduplication never swallows a new repeat.
+      const unique = row.serverId || kind !== "thread-message" ? identity : `${identity}@${now}`;
       return { version: 1, type: "dm", sender: row.sender, text: row.text, threadUrl: row.threadUrl,
         observedAt: new Date(now).toISOString(), kind,
-        eventId: `ig:${C.hash([row.thread, row.sender, kind, identity].join("\u001f"))}` };
+        eventId: `ig:${C.hash([row.thread, row.sender, kind, unique].join("\u001f"))}` };
     }
   }
   const api = { scan, Tracker, profileUsers, resolveSender };
