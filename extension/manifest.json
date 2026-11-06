@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Instagram Pet Bridge",
+  "version": "0.1.0",
+  "description": "Locally forwards newly rendered, allowlisted Instagram DM observations to your Mac pet.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "nativeMessaging", "alarms"],
+  "background": { "service_worker": "service-worker.js" },
+  "action": { "default_title": "Instagram Pet settings", "default_popup": "popup.html" },
+  "options_page": "options.html",
+  "content_scripts": [{
+    "matches": ["https://www.instagram.com/*", "https://instagram.com/*"],
+    "js": ["common.js", "detector.js", "content.js"],
+    "run_at": "document_idle",
+    "all_frames": false
+  }]
+}

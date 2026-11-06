@@ -1,0 +1,5 @@
+.DS_Store
+macos/.build/
+macos/.swiftpm/
+extension/node_modules/
+work/
