@@ -13,6 +13,38 @@ public enum PetError: Error, CustomStringConvertible {
     }
 }
 
+public enum PetSource: String, Codable, CaseIterable {
+    case instagram, kakao, messages
+
+    public var title: String {
+        switch self { case .instagram: return "Instagram"; case .kakao: return "KakaoTalk"; case .messages: return "Messages" }
+    }
+}
+
+/// Local sources use opaque keys, never contact names/handles in URLs or read-mark filenames.
+public struct ConversationKey: Codable, Hashable {
+    public let source: PetSource
+    public let key: String
+    public init(source: PetSource, key: String) { self.source = source; self.key = key }
+    public static func local(_ source: PetSource, identifier: String) -> ConversationKey {
+        ConversationKey(source: source, key: source.rawValue + ":" + privateDigest(identifier))
+    }
+    public var isValid: Bool {
+        switch source {
+        case .instagram: return PetEvent.isThreadURL(key)
+        case .kakao, .messages: return key.range(of: "^" + source.rawValue + ":[a-f0-9]{64}$", options: .regularExpression).map { $0 == key.startIndex..<key.endIndex } ?? false
+        }
+    }
+    public func isRead(observedAt: String, in marks: [ConversationKey: Date]) -> Bool {
+        guard let at = marks[self], let observed = PetEvent.date(observedAt) else { return false }
+        return observed <= at
+    }
+}
+
+private func privateDigest(_ value: String) -> String {
+    SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
 public struct PetEvent: Codable, Equatable {
     public let version: Int
     public let type: String
@@ -23,24 +55,40 @@ public struct PetEvent: Codable, Equatable {
     public let threadUrl: String
     public let observedAt: String
     public let kind: String
+    public let source: PetSource
+    public var conversation: ConversationKey { ConversationKey(source: source, key: threadUrl) }
+    public var identity: String { source.rawValue + ":" + eventId }
 
     public init(version: Int = 1, type: String = "dm", eventId: String,
                 sender: String, displayName: String? = nil, text: String,
-                threadUrl: String, observedAt: String, kind: String) {
+                threadUrl: String, observedAt: String, kind: String, source: PetSource = .instagram) {
         self.version = version; self.type = type; self.eventId = eventId
         self.sender = sender; self.displayName = displayName; self.text = text
         self.threadUrl = threadUrl; self.observedAt = observedAt; self.kind = kind
+        self.source = source
+    }
+
+    enum CodingKeys: String, CodingKey { case version, type, eventId, sender, displayName, text, threadUrl, observedAt, kind, source }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(Int.self, forKey: .version); type = try c.decode(String.self, forKey: .type)
+        eventId = try c.decode(String.self, forKey: .eventId); sender = try c.decode(String.self, forKey: .sender)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName); text = try c.decode(String.self, forKey: .text)
+        threadUrl = try c.decode(String.self, forKey: .threadUrl); observedAt = try c.decode(String.self, forKey: .observedAt)
+        kind = try c.decode(String.self, forKey: .kind)
+        source = try c.decodeIfPresent(PetSource.self, forKey: .source) ?? .instagram
     }
 
     public func validate() throws {
         guard version == 1, type == "dm" else { throw PetError.invalid("unsupported version/type") }
         guard Self.matches(eventId, "^[A-Za-z0-9._:-]{1,128}$") else { throw PetError.invalid("eventId") }
-        guard Self.matches(sender, "^[a-z0-9._]{1,30}$") else { throw PetError.invalid("sender username") }
+        guard Self.matches(sender, "^[a-z0-9._]{1,30}$") else { throw PetError.invalid("sender identifier") }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               text.count <= 2000, !text.contains("\0") else { throw PetError.invalid("text") }
         guard (displayName?.count ?? 0) <= 100 else { throw PetError.invalid("displayName") }
-        guard Self.isThreadURL(threadUrl) else { throw PetError.invalid("thread URL") }
+        guard conversation.isValid else { throw PetError.invalid("source conversation key") }
         guard ["thread-message", "inbox-preview", "test"].contains(kind) else { throw PetError.invalid("kind") }
+        guard source != .messages || kind != "inbox-preview" else { throw PetError.invalid("source kind") }
         guard let timestamp = Self.date(observedAt), timestamp.timeIntervalSinceNow <= 300 else {
             throw PetError.invalid("timestamp (ISO8601, no more than 5 minutes in the future)")
         }
@@ -129,7 +177,7 @@ public final class EventQueue {
         }
         return try locked {
             try cleanup()
-            let filename = digest(event.eventId) + ".json"
+            let filename = eventFilename(event)
             let receipt = paths.receipts.appendingPathComponent(filename)
             let destination = paths.inbox.appendingPathComponent(filename)
             if fileManager.fileExists(atPath: receipt.path) || fileManager.fileExists(atPath: destination.path) { return false }
@@ -166,35 +214,46 @@ public final class EventQueue {
 
     public func consume(_ event: PetEvent) throws {
         try locked {
-            let destination = paths.inbox.appendingPathComponent(digest(event.eventId) + ".json")
+            let destination = paths.inbox.appendingPathComponent(eventFilename(event))
             if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }
         }
     }
 
     /// The user saw this thread in Chrome: remember when, and drop its not-yet-shown messages up to then.
     public func markRead(threadUrl: String, at date: Date = Date()) throws {
-        guard PetEvent.isThreadURL(threadUrl) else { throw PetError.invalid("thread URL") }
+        try markRead(ConversationKey(source: .instagram, key: threadUrl), at: date)
+    }
+
+    public func markRead(_ conversation: ConversationKey, at date: Date = Date()) throws {
+        guard conversation.isValid else { throw PetError.invalid("source conversation key") }
         try locked {
-            let mark = try JSONSerialization.data(withJSONObject: ["threadUrl": threadUrl, "readAt": PetEvent.timestamp(date)], options: [.sortedKeys])
-            try atomicProtectedWrite(mark, to: paths.reads.appendingPathComponent(digest(threadUrl) + ".json"))
+            let id = conversation.source == .instagram ? conversation.key : conversation.source.rawValue + ":" + conversation.key
+            let destination = paths.reads.appendingPathComponent(digest(id) + ".json")
+            let previous = (try? JSONSerialization.jsonObject(with: protectedRead(destination))) as? [String: Any]
+            let effective = max(date, (previous?["readAt"] as? String).flatMap(PetEvent.date) ?? .distantPast)
+            let mark = try JSONSerialization.data(withJSONObject: ["source": conversation.source.rawValue, "threadUrl": conversation.key, "readAt": PetEvent.timestamp(effective)], options: [.sortedKeys])
+            try atomicProtectedWrite(mark, to: destination)
             for url in try jsonFiles(paths.inbox) {
                 guard let event = try? JSONDecoder().decode(PetEvent.self, from: protectedRead(url)),
-                      event.threadUrl == threadUrl, let observed = PetEvent.date(event.observedAt), observed <= date else { continue }
+                      event.conversation == conversation, let observed = PetEvent.date(event.observedAt), observed <= effective else { continue }
                 try fileManager.removeItem(at: url)
             }
         }
     }
 
     /// Latest read time per thread URL, within the 24h retention.
-    public func reads() throws -> [String: Date] {
+    public func reads() throws -> [ConversationKey: Date] {
         try locked {
             try cleanup()
-            var result: [String: Date] = [:]
+            var result: [ConversationKey: Date] = [:]
             for url in try jsonFiles(paths.reads) {
                 guard let object = (try? JSONSerialization.jsonObject(with: protectedRead(url))) as? [String: Any],
-                      let thread = object["threadUrl"] as? String, PetEvent.isThreadURL(thread),
+                      let thread = object["threadUrl"] as? String,
+                      let source = PetSource(rawValue: object["source"] as? String ?? "instagram"),
+                      ConversationKey(source: source, key: thread).isValid,
                       let at = (object["readAt"] as? String).flatMap(PetEvent.date) else { try? fileManager.removeItem(at: url); continue }
-                result[thread] = max(at, result[thread] ?? .distantPast)
+                let conversation = ConversationKey(source: source, key: thread)
+                result[conversation] = max(at, result[conversation] ?? .distantPast)
             }
             return result
         }
@@ -208,6 +267,10 @@ public final class EventQueue {
     }
 
     private func digest(_ id: String) -> String { SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined() }
+    private func eventFilename(_ event: PetEvent) -> String {
+        // Keep old Instagram receipts valid after upgrading.
+        digest(event.source == .instagram ? event.eventId : event.source.rawValue + "\0" + event.eventId) + ".json"
+    }
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
         try paths.prepare()

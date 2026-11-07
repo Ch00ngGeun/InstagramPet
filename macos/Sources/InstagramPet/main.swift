@@ -1,7 +1,8 @@
 import AppKit
 import PetCore
+import PetSources
 
-// The application deliberately has no network client. Chrome is the only DM source.
+// The application deliberately has no network client. Local sources join Chrome's private queue.
 final class PetPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -17,7 +18,21 @@ enum Orbit {
     /// read left → right on an arc above or below the pet, top → bottom on an arc to a side; near a corner the
     /// whole arc slides inward. Only once the pet is tucked away past the screen edge do they huddle round,
     /// flush in that corner. Index 0 is the newest bubble.
-    static let bubbleCount = 5
+    static let bubbleCount = 12
+    /// Up to four per app (KakaoTalk, Instagram, Messages); one app's burst never pushes out another app's bubbles.
+    static let perSource = 4
+    /// The inner arc keeps the original five-slot spacing; older bubbles continue on an outer arc.
+    static let innerArc = 5
+
+    /// `events` oldest first; keeps the newest `perSource` of each source, still oldest first.
+    static func capped(_ events: [PetEvent]) -> [PetEvent] {
+        var counts: [PetSource: Int] = [:]
+        let kept = events.reversed().filter { event in
+            counts[event.source, default: 0] += 1
+            return counts[event.source]! <= perSource
+        }
+        return Array(kept.reversed().suffix(bubbleCount))
+    }
 
     /// Where the tucked-away pet's corner is, or nil while the pet is (mostly) on screen.
     static func tuckCorner(pet: NSRect, area: NSRect) -> NSPoint? {
@@ -37,7 +52,7 @@ enum Orbit {
     }
 
     static func arcGoal(_ slot: Int, size: NSSize, pet: NSRect, facing: CGFloat) -> NSPoint {
-        let spread: CGFloat = 95 * .pi / 180, step = 2 * spread / CGFloat(bubbleCount - 1)
+        let spread: CGFloat = 95 * .pi / 180, step = 2 * spread / CGFloat(innerArc - 1)
         // Time runs left → right on a mostly horizontal arc and top → bottom on a mostly vertical one:
         // the newest end is the right-hand end, or the lower end.
         let ends = [facing - spread, facing + spread]
@@ -94,52 +109,127 @@ enum Orbit {
             let rows = stride(from: 0, to: oldest.count, by: 3).map { Array(oldest[$0..<min($0 + 3, oldest.count)]) }
             // Rows read top → bottom, oldest first: at the top the oldest row is the edge row, at the bottom
             // the newest row is.
-            var y = top ? area.maxY : area.minY
-            var rowRects: [[NSRect]] = []
+            var rowRects: [[NSRect]] = [], placed: [NSRect] = []
             for row in (top ? rows : rows.reversed()) {
-                let height = row.map(\.height).max() ?? 0
                 let total = row.reduce(0) { $0 + $1.width }
                 // Leave the arrow its own spot in the corner on the edge row.
                 let inset = rowRects.isEmpty ? arrow.width : 0
                 var x = right ? area.maxX - inset - total : area.minX + inset
                 var cells: [NSRect] = []
                 for size in row {
-                    cells.append(NSRect(x: x, y: top ? y - size.height : y, width: size.width, height: size.height))
+                    let cell = settle(x: x, size: size, top: top, on: placed, area: area)
+                    cells.append(cell); placed.append(cell)
                     x += size.width
                 }
                 if top { rowRects.append(cells) } else { rowRects.insert(cells, at: 0) }
-                y += top ? -height : height
             }
             rects = rowRects.flatMap { $0 }
         } else if min(db, dt) <= min(dl, dr) {
-            let top = dt < db, total = oldest.reduce(0) { $0 + $1.width }
-            // Run from beside the arrow toward the middle; flip if that side lacks room.
-            var x = arrow.midX < area.midX ? arrow.maxX : arrow.minX - total
-            if x + total > area.maxX { x = arrow.minX - total }
-            if x < area.minX { x = arrow.maxX }
-            x = min(max(x, area.minX), area.maxX - total)
-            for size in oldest {
-                rects.append(NSRect(x: x, y: top ? area.maxY - size.height : area.minY, width: size.width, height: size.height))
-                x += size.width
+            let top = dt < db
+            // Too many for one row: wrap into further rows, oldest row on the top edge, newest row on the bottom edge.
+            var placed: [NSRect] = []
+            // Rows never cover the arrow: wrap to the roomier side of it.
+            let lines = wrap(oldest, limit: max(arrow.minX - area.minX, area.maxX - arrow.maxX)) { $0.width }
+            // Every row starts from the same spot beside the arrow, so wrapped rows stack flush on each other.
+            let widest = lines.map { $0.reduce(0) { $0 + $1.width } }.max() ?? 0
+            var start = arrow.midX < area.midX ? arrow.maxX : arrow.minX - widest
+            if start + widest > area.maxX { start = arrow.minX - widest }
+            if start < area.minX { start = arrow.maxX }
+            start = min(max(start, area.minX), area.maxX - widest)
+            let towardRight = start >= arrow.maxX - 1
+            for line in top ? lines : lines.reversed() {
+                let total = line.reduce(0) { $0 + $1.width }
+                // Run from beside the arrow toward the middle.
+                var x = towardRight ? start : start + widest - total
+                var cells: [NSRect] = []
+                for size in line {
+                    let cell = settle(x: x, size: size, top: top, on: placed, area: area)
+                    cells.append(cell); placed.append(cell)
+                    x += size.width
+                }
+                if top { rects += cells } else { rects.insert(contentsOf: cells, at: 0) }
             }
         } else {
-            let right = dr < dl, total = oldest.reduce(0) { $0 + $1.height }
-            var top = arrow.midY > area.midY ? arrow.minY : arrow.maxY + total
-            if top - total < area.minY { top = arrow.maxY + total }
-            if top > area.maxY { top = arrow.minY }
-            top = min(max(top, area.minY + total), area.maxY)
-            for size in oldest {
-                rects.append(NSRect(x: right ? area.maxX - size.width : area.minX, y: top - size.height, width: size.width, height: size.height))
-                top -= size.height
+            let right = dr < dl
+            // Too many for one column: wrap into further columns stepping in from the edge.
+            var x = right ? area.maxX : area.minX
+            for line in wrap(oldest, limit: max(arrow.minY - area.minY, area.maxY - arrow.maxY), { $0.height }) {
+                let total = line.reduce(0) { $0 + $1.height }, width = line.map(\.width).max() ?? 0
+                var top = arrow.midY > area.midY ? arrow.minY : arrow.maxY + total
+                if top - total < area.minY { top = arrow.maxY + total }
+                if top > area.maxY { top = arrow.minY }
+                top = min(max(top, area.minY + total), area.maxY)
+                for size in line {
+                    rects.append(NSRect(x: right ? x - size.width : x, y: top - size.height, width: size.width, height: size.height))
+                    top -= size.height
+                }
+                x += right ? -width : width
             }
         }
         return rects.reversed()
+    }
+
+    /// More than five: an arc can't hold them in readable order, so they form a block beside the pet on its
+    /// roomiest side — rows of three read left → right, oldest row at the top. Returns centres newest first.
+    static func blockGoals(_ sizes: [NSSize], pet: NSRect, area: NSRect) -> [NSPoint] {
+        let oldest = Array(sizes.reversed())
+        let rows = stride(from: 0, to: oldest.count, by: 3).map { Array(oldest[$0..<min($0 + 3, oldest.count)]) }
+        let widths = rows.map { $0.reduce(0) { $0 + $1.width } }, heights = rows.map { $0.map(\.height).max() ?? 0 }
+        let w = widths.max() ?? 0, h = heights.reduce(0, +)
+        let shown = pet.intersection(area).isEmpty ? pet : pet.intersection(area)
+        let body = shown.insetBy(dx: -gap / 2 - 1, dy: -gap / 2 - 1)
+        let midY = shown.midY + shown.height * 0.15
+        // (block origin, alignment of short rows toward the pet: -1 left, 0 centre, 1 right, room on that side)
+        let sides: [(NSPoint, Int, CGFloat)] = [
+            (NSPoint(x: body.maxX, y: midY - h / 2), -1, area.maxX - body.maxX - w),
+            (NSPoint(x: body.minX - w, y: midY - h / 2), 1, body.minX - area.minX - w),
+            (NSPoint(x: shown.midX - w / 2, y: body.maxY), 0, area.maxY - body.maxY - h),
+            (NSPoint(x: shown.midX - w / 2, y: body.minY - h), 0, body.minY - area.minY - h)
+        ]
+        func clamped(_ o: NSPoint) -> NSRect {
+            NSRect(x: min(max(o.x, area.minX), area.maxX - w), y: min(max(o.y, area.minY), area.maxY - h), width: w, height: h)
+        }
+        let fitting = sides.filter { !clamped($0.0).intersects(body) }
+        let (origin, align, _) = (fitting.isEmpty ? sides : fitting).max { $0.2 < $1.2 }!
+        let block = clamped(origin)
+        // Each bubble hangs from the one above it (no row-height gaps).
+        var placed: [NSRect] = []
+        for (index, row) in rows.enumerated() {
+            var x = align < 0 ? block.minX : align > 0 ? block.maxX - widths[index] : block.midX - widths[index] / 2
+            for size in row {
+                placed.append(settle(x: x, size: size, top: true, on: placed, area: block))
+                x += size.width
+            }
+        }
+        return placed.map { NSPoint(x: $0.midX, y: $0.midY) }.reversed()
+    }
+
+    /// Drops a bubble straight toward the edge (down onto the bottom, up against the top) until it rests on
+    /// whatever is already stacked under it, so uneven heights leave no gaps.
+    static func settle(x: CGFloat, size: NSSize, top: Bool, on placed: [NSRect], area: NSRect) -> NSRect {
+        let under = placed.filter { min($0.maxX, x + size.width) - max($0.minX, x) > 1 }
+        let y = top ? (under.map(\.minY).min() ?? area.maxY) - size.height : under.map(\.maxY).max() ?? area.minY
+        return NSRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
+    /// Greedy line breaking, order kept: as many as fit within `limit` per line.
+    static func wrap(_ sizes: [NSSize], limit: CGFloat, _ length: (NSSize) -> CGFloat) -> [[NSSize]] {
+        var lines: [[NSSize]] = [], used: CGFloat = 0
+        for size in sizes {
+            if lines.isEmpty || used + length(size) > limit { lines.append([]); used = 0 }
+            lines[lines.count - 1].append(size); used += length(size)
+        }
+        // Same number of lines, but evenly filled (12 → 6 + 6 rather than 8 + 4) when that still fits.
+        let per = (sizes.count + lines.count - 1) / max(1, lines.count)
+        let even = stride(from: 0, to: sizes.count, by: max(1, per)).map { Array(sizes[$0..<min($0 + per, sizes.count)]) }
+        return even.count == lines.count && even.allSatisfy({ $0.reduce(0) { $0 + length($1) } <= limit }) ? even : lines
     }
 
     /// Centres for bubbles of these sizes (newest first).
     static func lineGoals(_ sizes: [NSSize], pet: NSRect, area: NSRect) -> [NSPoint] {
         guard !sizes.isEmpty else { return [] }
         if let corner = tuckCorner(pet: pet, area: area) { return Array(repeating: corner, count: sizes.count) }
+        if sizes.count > innerArc { return blockGoals(sizes, pet: pet, area: area) }
         let facing = facing(pet: pet, area: area)
         var goals = sizes.enumerated().map { arcGoal($0.offset, size: $0.element, pet: pet, facing: facing) }
         // Near a corner part of the arc would fall off screen: slide the whole arc inward, keeping its order.
@@ -168,6 +258,12 @@ enum Orbit {
             return options.map { _ in (tuckArrowRect(anchor: anchor, area: area), 0) }
         }
         let line = slots.allSatisfy({ $0 < bubbleCount }) ? lineGoals(options.map { $0[0] }, pet: pet, area: area) : []
+        // The block is already non-overlapping and in reading order: use it as is.
+        if options.count > innerArc && line.count == options.count && tuckCorner(pet: pet, area: area) == nil {
+            return zip(line, options).map { goal, sizes in
+                (NSRect(x: goal.x - sizes[0].width / 2, y: goal.y - sizes[0].height / 2, width: sizes[0].width, height: sizes[0].height), 0)
+            }
+        }
         // Each item clings to the one placed just before it (the next newer message), so even when crowded
         // into a corner the bubbles form a chain in time order instead of filling gaps at random.
         func gapTo(_ rect: NSRect) -> CGFloat {
@@ -316,7 +412,7 @@ enum Slime {
     }
 }
 
-/// One soft slime blob: flat white, no outline or tail. It flattens where it touches a screen edge or a neighbour,
+/// One soft white slime blob with a thin source-coloured rim. It flattens at a screen edge or neighbour,
 /// and stretches and jiggles when it moves. Idle blobs stay still.
 final class BubbleView: NSView {
     static let font = NSFont.systemFont(ofSize: 14)
@@ -360,8 +456,6 @@ final class BubbleView: NSView {
         [messageField, timeField].forEach { $0.isSelectable = false; addSubview($0) }
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityHelp("Click to open this conversation in Google Chrome. Right-click to hide bubbles for a while.")
-        toolTip = "Open conversation in Google Chrome · Right-click to hide for a while"
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -392,7 +486,59 @@ final class BubbleView: NSView {
                    walls: walls.map { $0.local(to: self) })
     }
 
-    override func draw(_ dirtyRect: NSRect) { Slime.fill(blob) }
+    private static let sourceColours: [PetSource: [NSColor]] = [
+        .instagram: [NSColor(calibratedRed: 0.96, green: 0.36, blue: 0.29, alpha: 1),
+                     NSColor(calibratedRed: 0.93, green: 0.24, blue: 0.55, alpha: 1),
+                     NSColor(calibratedRed: 0.64, green: 0.30, blue: 0.85, alpha: 1)],
+        .kakao: [NSColor(calibratedRed: 254.0 / 255, green: 229.0 / 255, blue: 0, alpha: 1)],
+        .messages: [NSColor(calibratedRed: 52.0 / 255, green: 199.0 / 255, blue: 89.0 / 255, alpha: 1)]
+    ]
+
+    /// AppKit's CGPath property requires macOS 14; keep this renderer compatible with macOS 13.
+    private static func outline(_ path: NSBezierPath) -> CGPath {
+        if #available(macOS 14.0, *) { return path.cgPath }
+        let result = CGMutablePath()
+        var points = [NSPoint](repeating: .zero, count: 3)
+        for index in 0..<path.elementCount {
+            switch path.element(at: index, associatedPoints: &points) {
+            case .moveTo: result.move(to: points[0])
+            case .lineTo: result.addLine(to: points[0])
+            case .curveTo: result.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .closePath: result.closeSubpath()
+            default: break // quadratic elements are available only on macOS 14+ above
+            }
+        }
+        return result
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = blob
+        Slime.fill(path)
+        guard let source = event?.source, let colours = Self.sourceColours[source] else { return }
+        NSGraphicsContext.saveGraphicsState()
+        let tint = colours[colours.count / 2]
+        let glow = NSShadow()
+        glow.shadowColor = tint.withAlphaComponent(0.44)
+        glow.shadowBlurRadius = 7
+        glow.shadowOffset = .zero
+        glow.set()
+        tint.withAlphaComponent(0.45).setStroke()
+        path.lineWidth = 1.25
+        path.stroke()
+        NSGraphicsContext.restoreGraphicsState()
+
+        // Clip the gradient to the rim so the message surface remains white.
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        context.addPath(Self.outline(path))
+        context.setLineWidth(1.25)
+        context.setLineJoin(.round)
+        context.replacePathWithStrokedPath()
+        context.clip()
+        let gradientColours = colours.count == 1 ? [colours[0], colours[0]] : colours
+        NSGradient(colors: gradientColours)?.draw(in: path.bounds.insetBy(dx: -2, dy: -2), angle: 35)
+        context.restoreGState()
+    }
 
     override func layout() {
         super.layout()
@@ -405,10 +551,13 @@ final class BubbleView: NSView {
 
     func show(_ event: PetEvent) {
         self.event = event
-        wobble = Slime.wobble(event.eventId)
+        wobble = Slime.wobble(event.identity)
         messageField.stringValue = Self.message(event)
         timeField.stringValue = Self.time(event)
-        setAccessibilityLabel("\(timeField.stringValue): \(messageField.stringValue)")
+        let destination = event.source == .instagram ? "Google Chrome" : event.source.title
+        setAccessibilityLabel("\(event.source.title), \(timeField.stringValue): \(messageField.stringValue)")
+        setAccessibilityHelp("\(event.source.title) message. Click to open \(destination). Right-click to hide bubbles for a while.")
+        toolTip = "\(event.source.title) · Open in \(destination) · Right-click to hide for a while"
         needsLayout = true; needsDisplay = true
     }
 
@@ -458,15 +607,15 @@ final class BubbleField: NSView {
 
     /// `events` is oldest first; the last one is the current message.
     func show(_ events: [PetEvent]) {
-        order = Array(events.suffix(Orbit.bubbleCount))
-        let ids = Set(order.map(\.eventId))
+        order = Orbit.capped(events)
+        let ids = Set(order.map(\.identity))
         for (id, view) in views where !ids.contains(id) { view.removeFromSuperview(); views[id] = nil }
-        for event in order where views[event.eventId] == nil {
+        for event in order where views[event.identity] == nil {
             let view = BubbleView(frame: .zero)
             view.alphaValue = 0
             view.onClick = { [weak self] in self?.onClick?($0) }
             view.show(event)
-            addSubview(view); views[event.eventId] = view
+            addSubview(view); views[event.identity] = view
         }
         solvedKey = ""
         isHidden = false
@@ -474,7 +623,7 @@ final class BubbleField: NSView {
 
     /// Re-solve only when the pet, the screen or the messages change; spring every tick.
     func update(pet: NSRect, area: NSRect, animated: Bool) {
-        let key = "\(pet.integral)|\(area)|\(order.map(\.eventId))|\(String(describing: Orbit.tuckAnchor))"
+        let key = "\(pet.integral)|\(area)|\(order.map(\.identity))|\(String(describing: Orbit.tuckAnchor))"
         if key != solvedKey {
             solvedKey = key
             let newest = Array(order.reversed())
@@ -482,7 +631,7 @@ final class BubbleField: NSView {
             let spots = Orbit.place(options, slots: Array(newest.indices), pet: pet, area: area)
             footprints = spots.map(\.rect)
             for (event, spot) in zip(newest, spots) {
-                guard let view = views[event.eventId] else { continue }
+                guard let view = views[event.identity] else { continue }
                 view.goal = spot.rect
                 if view.shape != spot.shape { view.shape = spot.shape }
             }
@@ -513,17 +662,28 @@ final class BubbleField: NSView {
             var walls = edges
             let mine = view.footprintNow, c = NSPoint(x: mine.midX, y: mine.midY)
             for other in all where other !== view {
-                let theirs = other.footprintNow, d = NSPoint(x: theirs.midX - c.x, y: theirs.midY - c.y)
-                let distance = hypot(d.x, d.y)
-                guard distance > 1 else { continue }
-                let n = NSPoint(x: d.x / distance, y: d.y / distance)
-                let reachMine = abs(n.x) * mine.width / 2 + abs(n.y) * mine.height / 2
-                let reachTheirs = abs(n.x) * theirs.width / 2 + abs(n.y) * theirs.height / 2
-                let share = distance * reachMine / (reachMine + reachTheirs)
+                let theirs = other.footprintNow
+                // Contact faces are always straight and axis-aligned (vertical between side-by-side bubbles,
+                // horizontal between stacked ones), midway between the two edges, even when the neighbours are
+                // offset or differ in size: a slanted face made the outlines ripple and leave ragged gaps.
+                let overlapX = min(mine.maxX, theirs.maxX) - max(mine.minX, theirs.minX)
+                let overlapY = min(mine.maxY, theirs.maxY) - max(mine.minY, theirs.minY)
+                let gapX = max(theirs.minX - mine.maxX, mine.minX - theirs.maxX), gapY = max(theirs.minY - mine.maxY, mine.minY - theirs.maxY)
+                guard max(gapX, gapY) < 24, max(overlapX, overlapY) > 8 else { continue }
+                let n: NSPoint, point: NSPoint
+                if overlapY >= overlapX {
+                    let right = theirs.midX > c.x
+                    n = NSPoint(x: right ? 1 : -1, y: 0)
+                    point = NSPoint(x: right ? (mine.maxX + theirs.minX) / 2 : (mine.minX + theirs.maxX) / 2, y: c.y)
+                } else {
+                    let up = theirs.midY > c.y
+                    n = NSPoint(x: 0, y: up ? 1 : -1)
+                    point = NSPoint(x: c.x, y: up ? (mine.maxY + theirs.minY) / 2 : (mine.minY + theirs.maxY) / 2)
+                }
                 // The neighbour's drawn ellipse: body (footprint minus tailRoom) grown by the bulge.
                 let body = theirs.insetBy(dx: BubbleView.tailRoom, dy: BubbleView.tailRoom)
                 let zone = body.insetBy(dx: -body.width * (BubbleView.bulge - 1) / 2, dy: -body.height * (BubbleView.bulge - 1) / 2)
-                walls.append(Wall(point: NSPoint(x: c.x + n.x * share, y: c.y + n.y * share), normal: n, zone: zone))
+                walls.append(Wall(point: point, normal: n, zone: zone))
             }
             // The pet is a wall too: a stretched or squashed blob flattens against it instead of overlapping it.
             let solid = pet.insetBy(dx: 10, dy: 6)
@@ -641,9 +801,9 @@ final class HideArrow: NSView {
 final class CatView: NSView {
     /// Fixed sprite height, so the view can be larger than the sprite and leave room for the jelly lean.
     static let spriteHeight: CGFloat = 338
-    /// Room on every side of the sprite for a 30% trail, lean and squash bulge.
-    static let room: CGFloat = 112
-    static let size = NSSize(width: 360, height: 338 + 2 * 112)
+    /// Enough transparent room for the wall bulge and the body's simultaneous drag trail.
+    static let room: CGFloat = 172
+    static let size = NSSize(width: 480, height: spriteHeight + 2 * room)
     var phase: CGFloat = 0
     var excited = false
     var onClick: (() -> Void)?
@@ -667,6 +827,18 @@ final class CatView: NSView {
     var onDragTo: ((NSPoint) -> Void)?
     // Bundled cutout character; missing only when run outside the .app bundle.
     private let sprite = Bundle.main.image(forResource: "pet")
+    /// Bottom-to-top alpha spans, cached once; transparent pixels do not count as wall contact.
+    private lazy var opaqueRows: [(CGFloat, CGFloat)] = {
+        guard let image = sprite?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return [] }
+        let bitmap = NSBitmapImageRep(cgImage: image), width = bitmap.pixelsWide, height = bitmap.pixelsHigh
+        return (0..<height).map { row in
+            var left = width, right = 0
+            for x in 0..<width where (bitmap.colorAt(x: x, y: height - row - 1)?.alphaComponent ?? 0) > 0 {
+                left = min(left, x); right = max(right, x + 1)
+            }
+            return left < right ? (CGFloat(left) / CGFloat(width), CGFloat(right) / CGFloat(width)) : (0, 1)
+        }
+    }()
     private let pink = NSColor(calibratedRed: 0.91, green: 0.55, blue: 0.52, alpha: 1)
 
     override init(frame frameRect: NSRect) {
@@ -695,16 +867,7 @@ final class CatView: NSView {
     /// The body's real outline right now (view coordinates): flattened against walls, with its bulge.
     /// Bubbles orbit and collide with this, so they close in on a squashed pet instead of leaving a gap.
     var bodyRect: NSRect {
-        let rect = spriteRect
-        let l = max(0, squash[0]), r = max(0, squash[1]), b = max(0, squash[2]), t = max(0, squash[3])
-        let squeezeX = l + r, squeezeY = b + t
-        let width = max(rect.width * 0.2, rect.width - squeezeX), height = max(rect.height * 0.2, rect.height - squeezeY)
-        let minX = l >= r ? rect.minX : rect.maxX - width, minY = b >= t ? rect.minY : rect.maxY - height
-        // Same bulges as drawn: a puddle spreads sideways, a side squeeze swells away from the wall.
-        let spread = squeezeY * 0.4, swell = squeezeX * 0.55
-        var body = NSRect(x: minX - spread, y: minY, width: width + 2 * spread, height: height)
-        if l > r { body.size.width += swell } else if r > l { body.origin.x -= swell; body.size.width += swell }
-        return body
+        strips(in: spriteRect).reduce(NSRect.null) { $0.union($1.destination) }
     }
 
     var isSquashed: Bool { squash.contains { abs($0) > 0.3 } || pressTarget.contains { $0 > 0 } }
@@ -744,49 +907,105 @@ final class CatView: NSView {
         if let sprite { drawSquashed(sprite, in: rect) }
         if excited {
             let heart: NSString = "♥"
-            let top = NSPoint(x: lag.x * pull(x: 0.85, t: 0.9), y: lag.y * pull(x: 0.85, t: 0.9))
             // Rides on the real (possibly squashed) head, not where the head would be unsquashed.
             let body = bodyRect.offsetBy(dx: 0, dy: rect.minY - spriteRect.minY)
-            heart.draw(at: NSPoint(x: min(body.maxX - 4, bounds.maxX - 24) + top.x, y: body.maxY - 34 + sin(phase) * 3 + top.y), withAttributes: [.font: NSFont.systemFont(ofSize: 23), .foregroundColor: pink])
+            heart.draw(at: NSPoint(x: min(body.maxX - 4, bounds.maxX - 24), y: body.maxY - 34 + sin(phase) * 3), withAttributes: [.font: NSFont.systemFont(ofSize: 23), .foregroundColor: pink])
         }
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    /// The sprite in thin horizontal strips: pressed against a wall it flattens there and its mass bulges out
-    /// elsewhere, so it loses its shape like slime instead of being clipped by the screen edge.
-    private func drawSquashed(_ sprite: NSImage, in rect: NSRect) {
-        let hints: [NSImageRep.HintKey: Any] = [.interpolation: NSImageInterpolation.high.rawValue]
+    struct Strip {
+        /// Normalized source rectangle, shared with the render and geometry checks.
+        let source: NSRect
+        let destination: NSRect
+    }
+
+    private func opaqueSpan(from t0: CGFloat, to t1: CGFloat) -> (CGFloat, CGFloat) {
+        guard !opaqueRows.isEmpty else { return (0, 1) }
+        // Include neighbouring source pixels sampled by image interpolation.
+        let first = max(0, Int(t0 * CGFloat(opaqueRows.count)) - 1)
+        let last = min(opaqueRows.count, Int(ceil(t1 * CGFloat(opaqueRows.count))) + 1)
+        return opaqueRows[first..<last].reduce((1, 0)) { (min($0.0, $1.0), max($0.1, $1.1)) }
+    }
+
+    /// Shared, ordered strip boundaries: a deep squeeze cannot fold or discard any image rows.
+    func strips(in rect: NSRect) -> [Strip] {
         let l = squash[0], r = squash[1], b = squash[2], t = squash[3]
-        guard squash.contains(where: { abs($0) > 0.3 }) || abs(lag.x) + abs(lag.y) > 0.3 else {
-            sprite.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: hints); return
+        guard isSquashed || abs(lag.x) + abs(lag.y) > 0.3 else {
+            return [Strip(source: NSRect(x: 0, y: 0, width: 1, height: 1), destination: rect)]
         }
         let squeezeX = l + r, squeezeY = b + t
-        // The wall side stays put; the far side gives way.
         let width = max(rect.width * 0.2, rect.width - squeezeX), height = max(rect.height * 0.2, rect.height - squeezeY)
         let minX = l >= r ? rect.minX : rect.maxX - width
         let minY = b >= t ? rect.minY : rect.maxY - height
-        // Strips about 2pt tall, so neighbouring strips differ too little to show steps.
-        let n = max(48, Int(height / 2)), size = sprite.size
+        let n = max(48, Int(height / 2)), column = (grabSide + 1) / 2
+        let weights = (0...n).map { pull(x: column, t: CGFloat($0) / CGFloat(n)) }
+        // Preserve the free drag's 1:1 pull. Only limit an impossible compression that would
+        // reverse neighbouring rows; every strip retains at least a tenth of its base height.
+        var verticalPull: CGFloat = 1
+        for i in 0..<n {
+            let change = lag.y * (weights[i + 1] - weights[i])
+            if change < 0 { verticalPull = min(verticalPull, 0.9 * height / CGFloat(n) / -change) }
+        }
+        var edges = (0...n).map { minY + height * CGFloat($0) / CGFloat(n) + lag.y * verticalPull * weights[$0] }
+        if let area {
+            // The wall belongs to the screen, even while the panel is still following the mouse.
+            let shift: CGFloat
+            if pressTarget[2] > 0 && pressTarget[2] >= pressTarget[3] { shift = area.minY - edges[0] }
+            else if pressTarget[3] > 0 { shift = area.maxY - edges[n] }
+            else { shift = max(0, area.minY - edges[0]) - max(0, edges[n] - area.maxY) }
+            edges = edges.map { $0 + shift }
+        }
+        var ends: [(CGFloat, CGFloat, CGFloat, CGFloat)] = []
+        var horizontalPull: CGFloat = 1
         for i in 0..<n {
             let t0 = CGFloat(i) / CGFloat(n), t1 = CGFloat(i + 1) / CGFloat(n), tm = (t0 + t1) / 2
-            // Squeezed sideways: fattest in the middle, bulging away from the wall.
             let swell = squeezeX * 0.55 * sin(.pi * tm)
-            // Squashed from above or below: the mass spreads like a puddle near that wall.
             let nearWall = b >= t ? 1 - tm : tm
             let spread = squeezeY * 0.4 * pow(sin(.pi / 2 * (0.25 + 0.75 * nearWall)), 2)
             var x0 = minX - spread - (r > l ? swell : 0), x1 = minX + width + spread + (l >= r && l > 0 ? swell : 0)
             if l > 0 && r > 0 { x0 = minX - swell / 2 - spread; x1 = minX + width + swell / 2 + spread }
-            // Each strip's ends and edges move with the grabbed area by their own amount: stretched where it is
-            // pulled away, squashed where it is pushed into the body, untouched far away.
-            x0 += lag.x * pull(x: 0, t: tm); x1 += lag.x * pull(x: 1, t: tm)
-            if let area { x0 = max(x0, area.minX); x1 = min(x1, area.maxX) }
-            let column = (grabSide + 1) / 2
-            var y0 = minY + height * t0 + lag.y * pull(x: column, t: t0), y1 = minY + height * t1 + lag.y * pull(x: column, t: t1)
-            if let area { y0 = max(area.minY, min(area.maxY, y0)); y1 = max(area.minY, min(area.maxY, y1)) }
-            guard x1 > x0, y1 > y0 else { continue }
-            let source = NSRect(x: 0, y: size.height * t0, width: size.width, height: size.height * (t1 - t0))
-            sprite.draw(in: NSRect(x: x0, y: y0, width: max(1, x1 - x0), height: y1 - y0 + 0.6), from: source,
+            let dx0 = lag.x * pull(x: 0, t: tm), dx1 = lag.x * pull(x: 1, t: tm)
+            if dx1 < dx0 { horizontalPull = min(horizontalPull, 0.9 * (x1 - x0) / (dx0 - dx1)) }
+            ends.append((x0, x1, dx0, dx1))
+        }
+        let unclamped: [Strip] = (0..<n).map { i in
+            let end = ends[i], x0 = end.0 + horizontalPull * end.2, x1 = end.1 + horizontalPull * end.3
+            let t0 = CGFloat(i) / CGFloat(n), t1 = CGFloat(i + 1) / CGFloat(n), span = opaqueSpan(from: t0, to: t1)
+            return Strip(source: NSRect(x: span.0, y: t0, width: span.1 - span.0, height: t1 - t0),
+                         destination: NSRect(x: x0 + span.0 * (x1 - x0), y: edges[i],
+                                             width: (span.1 - span.0) * (x1 - x0), height: edges[i + 1] - edges[i]))
+        }
+        let left = unclamped.map { $0.destination.minX }.min() ?? minX
+        let right = unclamped.map { $0.destination.maxX }.max() ?? minX + width
+        var shiftX: CGFloat = 0
+        if let area {
+            if pressTarget[0] > 0 && pressTarget[0] >= pressTarget[1] { shiftX = area.minX - left }
+            else if pressTarget[1] > 0 { shiftX = area.maxX - right }
+            else { shiftX = max(0, area.minX - left) - max(0, right - area.maxX) }
+        }
+        return unclamped.map { strip in
+            Strip(source: strip.source, destination: strip.destination.offsetBy(dx: shiftX, dy: 0))
+        }
+    }
+
+    /// Keep the agreed horizontal-strip renderer; the same geometry also places the bubbles.
+    private func drawSquashed(_ sprite: NSImage, in rect: NSRect) {
+        let hints: [NSImageRep.HintKey: Any] = [.interpolation: NSImageInterpolation.high.rawValue]
+        for strip in strips(in: rect) {
+            // Crop with a shared destination clip, not separate tiny source images: resampling
+            // each source crop independently introduces transparent horizontal seams.
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current?.shouldAntialias = false
+            NSBezierPath(rect: strip.destination).addClip()
+            let fullHeight = strip.destination.height / strip.source.height
+            let fullWidth = strip.destination.width / strip.source.width
+            let full = NSRect(x: strip.destination.minX - strip.source.minX * fullWidth,
+                              y: strip.destination.minY - strip.source.minY * fullHeight,
+                              width: fullWidth, height: fullHeight)
+            sprite.draw(in: full, from: .zero,
                         operation: .sourceOver, fraction: 1, respectFlipped: true, hints: hints)
+            NSGraphicsContext.restoreGraphicsState()
         }
     }
 
@@ -827,6 +1046,22 @@ final class PetController: NSObject, NSApplicationDelegate {
     /// Pressed this deep into both walls of a corner at release: the pet tucks away behind its arrow.
     static let cornerPress: CGFloat = 30
     private let paths = PetPaths()
+    private var sourceConfig = SourcesConfig()
+    private var settingsWindow: SourcesSettingsWindowController?
+    private var settingsOpening = false
+    private var sourceConfigError: String?
+    private var localReaders: [LocalSourceReader] = [] // accessed only on the serial I/O queue after launch
+    private var lastSourcesPoll = Date.distantPast
+    private var sourceStatuses: [PetSource: SourceStatus] = [:]
+    private var kakaoAccessibilityStatus = SourceStatus.disabled
+    private var kakaoNotificationStatus = SourceStatus.disabled
+    private struct ReaderStatuses {
+        var sources: [PetSource: SourceStatus] = [:]
+        var accessibility = SourceStatus.disabled
+        var notifications = SourceStatus.disabled
+    }
+    private var sourceStatusItems: [PetSource: NSMenuItem] = [:]
+    private var permissionNotices = Set<PetSource>()
     private var queue: EventQueue!
     private var panel: PetPanel!       // the character
     private var overlay: PetPanel!     // screen-sized, click-through layer for bubbles and the arrow
@@ -838,12 +1073,10 @@ final class PetController: NSObject, NSApplicationDelegate {
     private var showNowItem: NSMenuItem!
     private var animationTimer: Timer?
     private var pollTimer: Timer?
-    private var bubbleTimer: Timer?
-    private var shownAt = Date()
     private var pending: [PetEvent] = []
     private var current: PetEvent?
     private var recent: [PetEvent] = [] // the (up to four) messages shown before `current`
-    private var readMarks: [String: Date] = [:]
+    private var readMarks: [ConversationKey: Date] = [:]
     private var knownIDs = Set<String>()
     private var knownOrder: [String] = []
     private var queueGeneration = 0
@@ -863,16 +1096,43 @@ final class PetController: NSObject, NSApplicationDelegate {
     private var lastCatOrigin = NSPoint.zero
     private var tuckArrowCenter: NSPoint?
     private var petTarget: NSPoint?
+    private var petDragArea: NSRect?
     private var overPet = false
     private var lastPress: (left: CGFloat, right: CGFloat, bottom: CGFloat, top: CGFloat) = (0, 0, 0, 0)
     private var arrowDragStart: (panel: NSPoint, arrow: NSPoint)?
     private var lastError: String?
-    private let io = DispatchQueue(label: "com.instagrampet.queue", qos: .utility)
+    private let io = DispatchQueue(label: "com.instagrampet.queue", qos: .userInitiated)
     private var smokeReport: URL?
     private var smokeFinishing = false
+    private var smokeBurstCount: Int?
+    private var smokeBurstSamples: [[Double]] = []
+    private var smokeNotificationMode = false
     private var previewMode = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-settings"), CommandLine.arguments.count > flag + 1 {
+            previewMode = true
+            checkSettings(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
+            return
+        }
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-pet-geometry"), CommandLine.arguments.count > flag + 1 {
+            previewMode = true
+            checkPetGeometry(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        if CommandLine.arguments.contains("--measure-live-ax") {
+            previewMode = true
+            measureLiveAccessibility()
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-source-reads"), CommandLine.arguments.count > flag + 1 {
+            previewMode = true
+            checkSourceReads(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
+            NSApplication.shared.terminate(nil)
+            return
+        }
         if let flag = CommandLine.arguments.firstIndex(of: "--render-preview"), CommandLine.arguments.count > flag + 1 {
             previewMode = true
             renderPreview(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
@@ -887,10 +1147,32 @@ final class PetController: NSObject, NSApplicationDelegate {
         }
         if let flag = CommandLine.arguments.firstIndex(of: "--smoke-test"), CommandLine.arguments.count > flag + 1 {
             smokeReport = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
+            if CommandLine.arguments.contains("--start-hidden") { // checks that a new message ends a timed hide
+                hidePetUntil = Date().addingTimeInterval(600); hideBubblesUntil = Date().addingTimeInterval(600)
+            }
+        }
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-burst-latency"), CommandLine.arguments.count > flag + 2 {
+            smokeReport = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
+            smokeBurstCount = max(1, min(100, Int(CommandLine.arguments[flag + 2]) ?? 5))
+        }
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-notification-latency"), CommandLine.arguments.count > flag + 2 {
+            guard ProcessInfo.processInfo.environment["INSTAGRAMPET_HOME"] != nil else {
+                previewMode = true; NSApplication.shared.terminate(nil); return
+            }
+            smokeReport = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
+            smokeBurstCount = max(1, min(100, Int(CommandLine.arguments[flag + 2]) ?? 5))
+            smokeNotificationMode = true
         }
         queue = EventQueue(paths: paths)
         do { try paths.prepare() }
         catch { lastError = "Cannot open private queue" }
+        if smokeReport == nil {
+            do { sourceConfig = try SourcesConfig.load(paths: paths) }
+            catch { sourceConfigError = "Sources configuration unavailable · check sources.json" }
+            localReaders = [makeContactReaders(.messages, config: sourceConfig), makeContactReaders(.kakao, config: sourceConfig)]
+        } else if smokeNotificationMode {
+            localReaders = [KakaoNotificationReader(name: "Fixture Friend", databaseURL: paths.root.appendingPathComponent("notification-fixture.db"))]
+        }
         buildPanel()
         buildMenu()
         if smokeReport == nil { overlay.orderFrontRegardless(); panel.orderFrontRegardless() }
@@ -904,23 +1186,25 @@ final class PetController: NSObject, NSApplicationDelegate {
                 self.followPet(step: 0.3)
                 let origin = self.panel.frame.origin
                 self.cat.shake(by: NSPoint(x: origin.x - self.lastCatOrigin.x, y: origin.y - self.lastCatOrigin.y))
-                if let visible = self.catScreen()?.frame {
-                    self.cat.area = visible.offsetBy(dx: -origin.x - self.cat.frame.minX, dy: -origin.y - self.cat.frame.minY)
-                }
+                self.updatePetArea()
                 self.lastCatOrigin = origin
                 self.cat.needsDisplay = true
             }
             self.layoutOverlay(animated: true)
             self.updateClickThrough()
         }
+        // The pet never takes focus, so let this background app show the open hand over it.
+        _ = CGSSetConnectionProperty(_CGSDefaultConnection(), _CGSDefaultConnection(), "SetsCursorInBackground" as CFString, kCFBooleanTrue)
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in self?.updateClickThrough() }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
             self?.updateClickThrough(); return event
         }
         updateClickThrough()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
+        pollTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(pollTimer!, forMode: .common)
         NotificationCenter.default.addObserver(self, selector: #selector(screenChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         poll()
+        if CommandLine.arguments.contains("--settings") { openSettings() }
         if smokeReport != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.finishSmokeTest() }
         }
@@ -928,7 +1212,7 @@ final class PetController: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if smokeReport == nil, !previewMode { persistPosition() }
-        animationTimer?.invalidate(); pollTimer?.invalidate(); bubbleTimer?.invalidate()
+        animationTimer?.invalidate(); pollTimer?.invalidate()
         if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
     }
@@ -1008,10 +1292,15 @@ final class PetController: NSObject, NSApplicationDelegate {
     private func buildMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "Instagram Pet controls")
-        statusItem.button?.toolTip = "Instagram Pet · requires an open Instagram tab"
+        statusItem.button?.toolTip = "Instagram Pet · Instagram / KakaoTalk / Messages"
         let menu = NSMenu()
         menu.addItem(item("Instagram Pet · MVP"))
         statusLine = item("Waiting for Chrome observations"); menu.addItem(statusLine)
+        for source in [PetSource.messages, .kakao] {
+            let line = item("\(source.title): disabled")
+            sourceStatusItems[source] = line
+            menu.addItem(line)
+        }
         menu.addItem(.separator())
         let bubbles = item("말풍선 잠깐 숨기기"); bubbles.submenu = hideMenu(action: #selector(hideBubblesFor(_:))); menu.addItem(bubbles)
         let pet = item("펫 잠깐 숨기기"); pet.submenu = hideMenu(action: #selector(hidePetFor(_:))); menu.addItem(pet)
@@ -1020,6 +1309,7 @@ final class PetController: NSObject, NSApplicationDelegate {
         menu.addItem(item("Show Demo Bubble", action: #selector(showDemo)))
         menu.addItem(item("Clear Waiting Messages", action: #selector(clearMessages)))
         menu.addItem(.separator())
+        menu.addItem(item("설정…", action: #selector(openSettings), key: ","))
         menu.addItem(item("Open Instagram Inbox", action: #selector(openInbox)))
         menu.addItem(item("Open Local Data Folder", action: #selector(openDataFolder)))
         menu.addItem(.separator())
@@ -1035,91 +1325,305 @@ final class PetController: NSObject, NSApplicationDelegate {
         return "\(max(1, Int((until.timeIntervalSinceNow / 60).rounded(.up))))분 후 다시 표시"
     }
 
+    @objc private func openSettings() {
+        if let settingsWindow, settingsWindow.window?.isVisible == true { settingsWindow.show(); return }
+        guard !settingsOpening else { return }
+        settingsOpening = true
+        io.async { [weak self] in
+            guard let self else { return }
+            let result = Result { try SourcesConfig.load(paths: self.paths) }
+            DispatchQueue.main.async {
+                self.settingsOpening = false
+                switch result {
+                case .failure:
+                    self.lastError = "설정 파일을 읽을 수 없습니다 · 로컬 데이터 폴더 확인"
+                    self.updateStatus()
+                case .success(let config):
+                    let controller = SourcesSettingsWindowController(config: config)
+                    controller.onSave = { [weak self] value, completion in self?.saveSettings(value, completion: completion) }
+                    self.settingsWindow = controller
+                    controller.show()
+                }
+            }
+        }
+    }
+
+    /// Called on the main thread. The I/O queue serializes file replacement and reader changes with polls.
+    private func saveSettings(_ value: SourcesConfig, completion: @escaping (Result<Void, SettingsFormError>) -> Void) {
+        let previous = sourceConfig
+        queueGeneration += 1 // Ignore a poll snapshot captured with the old selection.
+        io.async { [weak self] in
+            guard let self else { return }
+            do {
+                let config = try value.validated()
+                try config.save(paths: self.paths)
+                let changed = Self.changedSources(from: previous, to: config)
+                self.localReaders = self.localReaders.map { reader in
+                    guard changed.contains(reader.source) else { return reader }
+                    return self.makeContactReaders(reader.source, config: config, reusing: reader as? ContactReaders)
+                }
+                self.lastSourcesPoll = .distantPast
+                // Receipts and per-conversation read marks survive a selection change.
+                // If cleanup cannot run now, the display boundary rejects obsolete queued selections later.
+                if let waiting = try? self.queue?.pending() {
+                    for event in waiting where changed.contains(event.source) && !Self.acceptsEvent(event, config: config) {
+                        try? self.queue?.consume(event)
+                    }
+                }
+                DispatchQueue.main.async {
+                    self.applySettings(config, changed: changed)
+                    completion(.success(()))
+                    if !self.previewMode { self.poll() }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(SettingsFormError(message: "설정을 저장하지 못했습니다. 로컬 데이터 폴더의 소유권·권한과 입력을 확인해 주세요.")))
+                }
+            }
+        }
+    }
+
+    private func makeContactReaders(_ source: PetSource, config: SourcesConfig, reusing previous: ContactReaders? = nil) -> ContactReaders {
+        if source == .messages {
+            return ContactReaders(source: source, identifiers: config.messageHandles, reusing: previous) { MessagesReader(handle: $0) }
+        }
+        return ContactReaders(source: source, identifiers: config.kakaoNames, reusing: previous) { KakaoCombinedReader(name: $0, fallbackGrace: 0.5) }
+    }
+
+    private static func changedSources(from previous: SourcesConfig, to config: SourcesConfig) -> Set<PetSource> {
+        var changed = Set<PetSource>()
+        if previous.instagram != config.instagram { changed.insert(.instagram) }
+        if previous.messages != config.messages { changed.insert(.messages) }
+        if previous.kakao != config.kakao { changed.insert(.kakao) }
+        return changed
+    }
+
+    private func applySettings(_ config: SourcesConfig, changed: Set<PetSource>) {
+        sourceConfig = config; sourceConfigError = nil; lastError = nil
+        pending.removeAll { changed.contains($0.source) && !Self.acceptsEvent($0, config: config) }
+        recent.removeAll { changed.contains($0.source) && !Self.acceptsEvent($0, config: config) }
+        if let event = current, changed.contains(event.source), !Self.acceptsEvent(event, config: config) { current = recent.popLast() }
+        let shown = recent + [current].compactMap { $0 }
+        if shown.isEmpty { bubble.isHidden = true; cat.excited = false }
+        else if !bubble.isHidden { bubble.show(shown) }
+        for source in changed {
+            permissionNotices.remove(source)
+            if source == .messages { sourceStatuses[source] = config.messages == nil ? .disabled : .idle }
+            if source == .kakao {
+                sourceStatuses[source] = config.kakao == nil ? .disabled : .idle
+                kakaoAccessibilityStatus = config.kakao == nil ? .disabled : .idle
+                kakaoNotificationStatus = config.kakao == nil ? .disabled : .idle
+            }
+        }
+        updateStatus()
+    }
+
+    private static func acceptsEvent(_ event: PetEvent, config: SourcesConfig) -> Bool {
+        if event.kind == "test" { return true }
+        switch event.source {
+        case .instagram:
+            guard config.instagram != nil else { return true } // Legacy extension-managed selection.
+            guard let url = URL(string: event.threadUrl) else { return false }
+            let path = url.path.split(separator: "/").map(String.init)
+            return config.instagramSelections.contains { $0.username == event.sender && path == ["direct", "t", $0.threadId] }
+        case .messages:
+            return config.messageHandles.contains { ConversationKey.local(.messages, identifier: $0) == event.conversation }
+        case .kakao:
+            return config.kakaoNames.contains { ConversationKey.local(.kakao, identifier: $0) == event.conversation }
+        }
+    }
+
     private func updateStatus() {
         if let lastError { statusLine.title = lastError }
+        else if let sourceConfigError { statusLine.title = sourceConfigError }
         else if isTucked { statusLine.title = "펫 가장자리에 숨김 · \(remaining(tuckedUntil))" }
         else if isHidden { statusLine.title = "펫 숨김 · \(remaining(hidePetUntil)) · \(pending.count) waiting" }
         else if paused { statusLine.title = "말풍선 숨김 · \(remaining(hideBubblesUntil)) · \(pending.count) waiting" }
         else if !pending.isEmpty { statusLine.title = "\(pending.count) message(s) waiting" }
-        else { statusLine.title = "Ready · open Instagram tab required" }
+        else { statusLine.title = "Ready · Instagram은 대화 탭을 열어 두세요" }
         showNowItem.isEnabled = isHidden || paused || isTucked
+        for (source, line) in sourceStatusItems {
+            let detail: String
+            switch sourceStatuses[source] ?? .disabled {
+            case .disabled: detail = "꺼짐 · sources.json 확인"
+            case .idle: detail = "대기 · 앱/목록 창 확인"
+            case .observing: detail = "관측 중"
+            case .permissionRequired: detail = source == .messages ? "전체 디스크 접근 필요" : "손쉬운 사용 권한 필요"
+            case .unavailable: detail = source == .messages ? "DB/스키마 확인 필요" : "목록 구조 인식 불가"
+            }
+            var sourceDetail = detail
+            if source == .kakao, sourceStatuses[source] == .observing {
+                if kakaoAccessibilityStatus == .observing && kakaoNotificationStatus == .observing { sourceDetail = "관측 중 · 알림 + 목록" }
+                else if kakaoAccessibilityStatus == .permissionRequired { sourceDetail = "알림 관측 중 · 읽음 연동에 손쉬운 사용 권한 필요" }
+                else if kakaoNotificationStatus == .permissionRequired { sourceDetail = "목록 관측 중 · 개별 알림에 전체 디스크 접근 필요" }
+                else if kakaoAccessibilityStatus != .observing { sourceDetail = "알림 관측 중 · 읽음 연동은 목록 창 확인" }
+                else { sourceDetail = "목록 관측 중" }
+            }
+            line.title = "\(source.title): \(sourceDetail)"
+        }
+    }
+
+    /// Off the main thread. Reader outboxes are acknowledged only after durable queue acceptance.
+    private func pollLocalSources() throws -> ReaderStatuses? {
+        let now = Date()
+        guard now.timeIntervalSince(lastSourcesPoll) >= 0.45 else { return nil }
+        lastSourcesPoll = now
+        let waiting = try queue.pending()
+        var statuses = ReaderStatuses()
+        for reader in localReaders {
+            reader.restorePending(waiting)
+            let batch = reader.poll(now: now)
+            statuses.sources[reader.source] = batch.status
+            if let kakao = reader as? KakaoCombinedReader {
+                statuses.accessibility = kakao.accessibilityStatus
+                statuses.notifications = kakao.notificationStatus
+            } else if let kakao = reader as? ContactReaders, reader.source == .kakao {
+                statuses.accessibility = kakao.accessibilityStatus
+                statuses.notifications = kakao.notificationStatus
+            }
+            for (key, at) in batch.reads { try queue.markRead(key, at: at) }
+            let marks = try queue.reads()
+            var accepted = Set<String>()
+            for event in batch.events {
+                let expired = PetEvent.date(event.observedAt).map { now.timeIntervalSince($0) > EventQueue.retention } ?? true
+                if !expired && !event.conversation.isRead(observedAt: event.observedAt, in: marks) {
+                    do { try queue.enqueue(event) }
+                    catch PetError.queueFull { break } // still drain the existing queue; reader retries the rest
+                }
+                accepted.insert(event.identity)
+            }
+            reader.acknowledge(accepted)
+        }
+        if smokeNotificationMode, statuses.sources[.kakao] == .observing {
+            let ready = paths.root.appendingPathComponent("baseline.ready")
+            if !FileManager.default.fileExists(atPath: ready.path) { try Data("1".utf8).write(to: ready) }
+        }
+        return statuses
+    }
+
+    private func explainPermissionsIfNeeded() {
+        guard smokeReport == nil, !previewMode else { return }
+        for source in [PetSource.messages, .kakao] {
+            let needsPermission = source == .kakao ? kakaoAccessibilityStatus == .permissionRequired
+                : sourceStatuses[source] == .permissionRequired || kakaoNotificationStatus == .permissionRequired
+            guard needsPermission else { continue }
+            guard permissionNotices.insert(source).inserted else { continue }
+            let alert = NSAlert()
+            alert.messageText = source == .messages ? "메시지 말풍선에 전체 디스크 접근이 필요합니다" : "카카오톡 말풍선에 손쉬운 사용 권한이 필요합니다"
+            alert.informativeText = source == .messages
+                ? "시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근에서 설치된 InstagramPet.app을 추가하고 켜 주세요. 메시지와 카카오톡 개별 알림 DB를 읽기 전용으로 확인하며 과거 이력은 재생하지 않습니다. 권한을 켠 뒤 앱을 다시 열어 주세요."
+                : "시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 InstagramPet.app을 켜 주세요. 설정한 카카오톡 채팅 목록의 미리보기만 읽습니다. 카카오톡 앱과 목록 창이 있어야 합니다."
+            alert.addButton(withTitle: "확인")
+            // One notice per source per launch. No permission is granted by the app itself.
+            // In front: a modal alert hidden behind other windows silently freezes the pet until dismissed.
+            NSApp.activate(ignoringOtherApps: true)
+            alert.window.level = .statusBar + 1
+            alert.runModal()
+        }
     }
 
     private func poll() {
         guard queue != nil, !pollInFlight else { return }
         pruneExpiredMemory()
         // Leave excess events on disk rather than silently dropping them from memory.
-        guard pending.count < 100 else { return }
         pollInFlight = true
         let generation = queueGeneration
         io.async { [weak self] in
             guard let self else { return }
-            let result = Result { (try self.queue.pending(), try self.queue.reads()) }
+            let result = Result { (try self.pollLocalSources(), try self.queue.pending(), try self.queue.reads()) }
             DispatchQueue.main.async {
                 self.pollInFlight = false
                 guard generation == self.queueGeneration else { return }
                 switch result {
-                case .success(let (events, reads)):
+                case .success(let (statuses, events, reads)):
                     self.lastError = nil
+                    if let statuses {
+                        self.sourceStatuses = statuses.sources
+                        self.kakaoAccessibilityStatus = statuses.accessibility
+                        self.kakaoNotificationStatus = statuses.notifications
+                    }
                     self.applyReads(reads)
                     for event in events where !self.isRead(event) {
+                        if self.smokeReport == nil && !Self.acceptsEvent(event, config: self.sourceConfig) {
+                            self.io.async { [weak self] in try? self?.queue?.consume(event) }
+                            continue
+                        }
                         guard self.pending.count < 100 else { break }
-                        if self.knownIDs.contains(event.eventId) { continue }
+                        if self.knownIDs.contains(event.identity) { continue }
                         // Validate again at the display boundary, including the URL.
                         guard (try? event.validate()) != nil else { continue }
-                        self.knownIDs.insert(event.eventId)
-                        self.knownOrder.append(event.eventId)
+                        self.knownIDs.insert(event.identity)
+                        self.knownOrder.append(event.identity)
                         self.pending.append(event)
                     }
+                    self.pending.sort {
+                        let a = PetEvent.date($0.observedAt) ?? .distantPast, b = PetEvent.date($1.observedAt) ?? .distantPast
+                        return a == b ? $0.identity < $1.identity : a < b
+                    }
                     self.trimKnownIDs()
+                    // A new message always shows: it ends any timed hide (bubbles or pet) right away.
+                    if !self.pending.isEmpty && (self.paused || self.isHidden) { self.showNow() }
                     self.presentNextIfPossible()
-                    if !self.bubble.isHidden { self.scheduleDismiss() }
                 case .failure:
                     self.lastError = "Queue read failed · check data folder"
                 }
                 self.updateStatus()
+                self.explainPermissionsIfNeeded()
             }
         }
     }
 
     /// Seen in Chrome (or opened from a bubble): that thread's bubbles disappear.
     private func isRead(_ event: PetEvent) -> Bool {
-        guard let at = readMarks[event.threadUrl], let observed = PetEvent.date(event.observedAt) else { return false }
-        return observed <= at
+        event.conversation.isRead(observedAt: event.observedAt, in: readMarks)
     }
 
-    private func applyReads(_ reads: [String: Date]) {
-        guard reads != readMarks else { return }
-        readMarks = reads
+    private func applyReads(_ reads: [ConversationKey: Date]) {
+        var merged = reads
+        for (key, at) in readMarks where Date().timeIntervalSince(at) <= EventQueue.retention {
+            merged[key] = max(at, merged[key] ?? .distantPast)
+        }
+        guard merged != readMarks else { return }
+        readMarks = merged
         pending.removeAll(where: isRead)
-        let before = (recent + [current].compactMap { $0 }).map(\.eventId)
+        let before = (recent + [current].compactMap { $0 }).map(\.identity)
         recent.removeAll(where: isRead)
         if let shown = current, isRead(shown) { current = recent.popLast() }
         let still = recent + [current].compactMap { $0 }
-        guard !bubble.isHidden, still.map(\.eventId) != before else { return }
+        guard !bubble.isHidden, still.map(\.identity) != before else { return }
         // Other threads' bubbles stay; if nothing is left, the queue moves on or goes quiet.
         if still.isEmpty { dismissCurrent() } else { bubble.show(still) }
         updateStatus()
     }
 
-    private func markRead(_ threadUrl: String) {
+    private func markRead(_ conversation: ConversationKey) {
+        let at = Date()
         var marks = readMarks
-        marks[threadUrl] = Date()
+        marks[conversation] = at
         applyReads(marks)
-        io.async { [weak self] in try? self?.queue?.markRead(threadUrl: threadUrl) }
+        io.async { [weak self] in try? self?.queue?.markRead(conversation, at: at) }
     }
 
     private func presentNextIfPossible() {
-        guard !paused, !isHidden, bubble.isHidden, !pending.isEmpty else { return }
-        if let previous = current, previous.kind != "test" { recent = Array((recent + [previous]).suffix(Orbit.bubbleCount - 1)) }
-        current = pending.removeFirst()
-        if let current { present(current) }
+        guard !paused, !isHidden else { return }
+        // Existing unread bubbles never delay a new arrival. Keep the latest five together.
+        while !pending.isEmpty { present(pending.removeFirst()) }
+    }
+
+    /// Delivery can be delayed independently per source; newest means observedAt, not arrival order.
+    private func rememberForDisplay(_ event: PetEvent) -> [PetEvent] {
+        let previous = (recent + [current].compactMap { $0 }).filter { $0.identity != event.identity && $0.kind != "test" }
+        let ordered = Orbit.capped((previous + [event]).sorted {
+            let a = PetEvent.date($0.observedAt) ?? .distantPast, b = PetEvent.date($1.observedAt) ?? .distantPast
+            return a == b ? $0.identity < $1.identity : a < b
+        })
+        recent = Array(ordered.dropLast()); current = ordered.last
+        return ordered
     }
 
     private func present(_ event: PetEvent) {
         guard !paused, !isHidden else { return }
-        bubbleTimer?.invalidate()
-        bubble.show(recent.filter { $0.eventId != event.eventId } + [event])
+        bubble.show(rememberForDisplay(event))
         layoutOverlay(animated: false)
         // Retain undisplayed events on disk across app quits. Consume only on display.
         io.async { [weak self] in
@@ -1128,27 +1632,18 @@ final class PetController: NSObject, NSApplicationDelegate {
         }
         cat.excited = true
         if smokeReport == nil { overlay.orderFrontRegardless(); panel.orderFrontRegardless() }
-        // A readable, finite display period; the latest bubble remains available via the menu.
-        shownAt = Date(); bubbleTimer = nil
-        scheduleDismiss()
         updateStatus()
-        if smokeReport != nil { finishSmokeTest() }
-    }
-
-    // 12s when alone; when more are waiting, ~15 chars/s reading time (1.5–4s) so a burst doesn't back up.
-    static func burstHold(_ text: String) -> TimeInterval { min(4, max(1.5, 1 + Double(text.count) * 0.07)) }
-    /// Bubbles stay up: they leave only when hidden, read in Chrome, or 12 hours old. The timer just paces
-    /// a backlog, moving on to the next waiting message after a short read.
-    private func scheduleDismiss() {
-        guard !pending.isEmpty else { bubbleTimer?.invalidate(); bubbleTimer = nil; return }
-        let fire = shownAt.addingTimeInterval(Self.burstHold(current?.text ?? ""))
-        if let timer = bubbleTimer, timer.isValid, timer.fireDate <= fire { return }
-        bubbleTimer?.invalidate()
-        bubbleTimer = Timer.scheduledTimer(withTimeInterval: max(0, fire.timeIntervalSinceNow), repeats: false) { [weak self] _ in self?.dismissCurrent() }
+        if let expected = smokeBurstCount, let output = smokeReport {
+            let delay = Date().timeIntervalSince(PetEvent.date(event.observedAt) ?? Date()) * 1000
+            smokeBurstSamples.append([Double((recent + [current].compactMap { $0 }).count), max(0, delay)])
+            if smokeBurstSamples.count >= expected {
+                try? JSONSerialization.data(withJSONObject: smokeBurstSamples).write(to: output)
+                NSApplication.shared.terminate(nil)
+            }
+        } else if smokeReport != nil { finishSmokeTest() }
     }
 
     @objc private func dismissCurrent() {
-        bubbleTimer?.invalidate(); bubbleTimer = nil
         bubble.isHidden = true; cat.excited = false
         // With a backlog the bubbles shift in place: the newest one enters on the right.
         presentNextIfPossible()
@@ -1175,14 +1670,14 @@ final class PetController: NSObject, NSApplicationDelegate {
 
     @objc private func hideBubblesFor(_ sender: NSMenuItem) {
         hideBubblesUntil = Date().addingTimeInterval(TimeInterval(sender.tag * 60))
-        bubbleTimer?.invalidate(); bubble.isHidden = true; cat.excited = false
+        bubble.isHidden = true; cat.excited = false
         arrowKey = ""
         updateStatus()
     }
 
     @objc private func hidePetFor(_ sender: NSMenuItem) {
         hidePetUntil = Date().addingTimeInterval(TimeInterval(sender.tag * 60))
-        bubbleTimer?.invalidate(); bubble.isHidden = true; cat.excited = false
+        bubble.isHidden = true; cat.excited = false
         // Only the small slime arrow stays, so the pet can always be called back.
         panel.orderOut(nil)
         arrowKey = ""
@@ -1214,7 +1709,9 @@ final class PetController: NSObject, NSApplicationDelegate {
         if pending.count > 1, let last = pending.last {
             let skipped = Array(pending.dropLast())
             let prior = recent + [current].compactMap { $0 } + skipped
-            recent = Array(prior.filter { $0.kind != "test" }.suffix(Orbit.bubbleCount - 1))
+            recent = Orbit.capped(prior.filter { $0.kind != "test" }.sorted {
+                (PetEvent.date($0.observedAt) ?? .distantPast) < (PetEvent.date($1.observedAt) ?? .distantPast)
+            })
             current = nil
             pending = [last]
             io.async { [weak self] in
@@ -1325,6 +1822,347 @@ final class PetController: NSObject, NSApplicationDelegate {
 
     // MARK: Previews
 
+    /// The form and real asynchronous save/apply path, using only an isolated private home and fake contacts.
+    private func checkSettings(to output: URL) {
+        guard ProcessInfo.processInfo.environment["INSTAGRAMPET_HOME"] != nil,
+              paths.root.resolvingSymlinksInPath().path.hasPrefix("/private/tmp/") ||
+              paths.root.resolvingSymlinksInPath().path.hasPrefix(FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path + "/") else {
+            NSApp.terminate(nil); return
+        }
+        func finish(_ values: [String: Any]) {
+            try? JSONSerialization.data(withJSONObject: values, options: [.prettyPrinted, .sortedKeys]).write(to: output)
+            NSApp.terminate(nil)
+        }
+        do {
+            let initial = SourcesConfig(kakao: .init(name: "Fixture Friend"), messages: .init(handle: "fixture@example.invalid"))
+            try initial.save(paths: paths)
+            let original = try Data(contentsOf: paths.root.appendingPathComponent("sources.json"))
+            sourceConfig = initial; queue = EventQueue(paths: paths)
+            // Reader construction is lazy; previewMode suppresses automatic polling after each save.
+            localReaders = [MessagesReader(handle: initial.messages?.handle), KakaoCombinedReader(name: initial.kakao?.name)]
+            let oldMessages = ObjectIdentifier(localReaders[0]), oldKakao = ObjectIdentifier(localReaders[1])
+            buildPanel(); buildMenu(); statusItem.isVisible = false
+            let events = mixedSourceEvents()
+            recent = Array(events.dropLast()); current = events.last; pending = [events[0], events[1], events[4]]
+            bubble.show(events)
+            layoutOverlay(animated: false)
+            for event in pending { try queue.enqueue(event) }
+            try queue.markRead(events[0].conversation, at: Date().addingTimeInterval(-3600))
+            readMarks = try queue.reads()
+            let marks = readMarks
+            let form = SourcesSettingsWindowController(config: try SourcesConfig.load(paths: paths))
+            settingsWindow = form
+            let prefilled = !form.draft.managesInstagram && form.draft.messagesHandle == initial.messages?.handle && form.draft.kakaoName == initial.kakao?.name
+            form.username.stringValue = "fixture.sender"
+            form.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: form.username))
+            let automaticInstagram = form.draft.managesInstagram
+            form.username.stringValue = ""
+            form.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: form.username))
+            let clearedInstagram = (try? form.draft.validated())?.instagram == SourcesConfig.Instagram(username: "", threadId: "")
+            form.setDraft(SettingsDraft(initial))
+            var multiple = SettingsDraft(initial)
+            multiple.managesInstagram = true
+            multiple.username = "fixture.sender, other.sender"; multiple.threadId = "12345, 67890"
+            multiple.messagesHandle = "fixture@example.invalid, next@example.invalid"
+            multiple.kakaoName = "Fixture Friend, Fixture Other"
+            let multipleConfig = try multiple.validated()
+            let multipleSaved = multipleConfig.instagramSelections.count == 2 && multipleConfig.messageHandles.count == 2 && multipleConfig.kakaoNames.count == 2
+            multiple.threadId = "12345"
+            let mismatchedRejected = (try? multiple.validated()) == nil
+            var added = initial
+            added.messages = .init(handle: "fixture@example.invalid,next@example.invalid")
+            applySettings(added, changed: Self.changedSources(from: initial, to: added))
+            let retainedOnAdd = recent.count + (current == nil ? 0 : 1) == 5 && pending.count == 3
+            sourceConfig = initial
+            if let content = form.window?.contentView {
+                content.layoutSubtreeIfNeeded()
+                if let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                    content.cacheDisplay(in: content.bounds, to: bitmap)
+                    try? bitmap.representation(using: .png, properties: [:])?.write(to: output.deletingLastPathComponent().appendingPathComponent("settings-window.png"))
+                }
+            }
+            var submissions = 0
+            form.onSave = { [weak self] config, completion in
+                guard let self else { return }
+                submissions += 1
+                self.saveSettings(config, completion: completion)
+            }
+            var invalid = form.draft
+            invalid.managesInstagram = true; invalid.username = "fixture.sender"; invalid.threadId = "not-a-number"
+            form.setDraft(invalid); form.save()
+            let afterInvalid = try Data(contentsOf: paths.root.appendingPathComponent("sources.json"))
+            let invalidRejected = form.hasValidationError && submissions == 0 && original == afterInvalid
+            var edited = SettingsDraft(initial); edited.messagesHandle = "next@example.invalid"
+            form.setDraft(edited)
+            form.onSave = { [weak self] config, completion in
+                guard let self else { return }
+                submissions += 1
+                self.saveSettings(config) { result in
+                    completion(result)
+                    guard case .success = result else { finish(["ok": false, "stage": 1]); return }
+                    let stored = try? SourcesConfig.load(paths: self.paths)
+                    let shown = self.recent + [self.current].compactMap { $0 }
+                    let isolated = shown.count == 3 && shown.allSatisfy { $0.source != .messages } && self.pending.count == 2
+                    let recreated = self.localReaders.count == 2 && ObjectIdentifier(self.localReaders[0]) != oldMessages && ObjectIdentifier(self.localReaders[1]) == oldKakao
+                    let marksPreserved = self.readMarks == marks && (try? self.queue.reads()) == marks
+                    let saved = stored?.messages?.handle == "next@example.invalid" && stored?.kakao == initial.kakao && stored?.instagram == nil
+                    let disabled = SourcesConfig(instagram: .init(username: "", threadId: ""))
+                    self.saveSettings(disabled) { disabledResult in
+                        guard case .success = disabledResult else { finish(["ok": false, "stage": 2]); return }
+                        let final = try? SourcesConfig.load(paths: self.paths)
+                        let blankDisabled = final?.messages == nil && final?.kakao == nil && final?.instagram?.username == "" && self.sourceStatuses[.messages] == .disabled && self.sourceStatuses[.kakao] == .disabled
+                        let selected = multipleConfig
+                        let right = PetEvent(eventId: "settings-selected", sender: "fixture.sender", text: "synthetic", threadUrl: "https://www.instagram.com/direct/t/12345/", observedAt: PetEvent.timestamp(), kind: "thread-message")
+                        let wrong = PetEvent(eventId: "settings-other", sender: "other.sender", text: "synthetic", threadUrl: right.threadUrl, observedAt: right.observedAt, kind: "thread-message")
+                        let second = PetEvent(eventId: "settings-second", sender: "other.sender", text: "synthetic", threadUrl: "https://www.instagram.com/direct/t/67890/", observedAt: right.observedAt, kind: "thread-message")
+                        let message = PetEvent(eventId: "settings-message", sender: "messages.contact", text: "synthetic", threadUrl: ConversationKey.local(.messages, identifier: "next@example.invalid").key, observedAt: right.observedAt, kind: "thread-message", source: .messages)
+                        let kakao = PetEvent(eventId: "settings-kakao", sender: "kakao.contact", text: "synthetic", threadUrl: ConversationKey.local(.kakao, identifier: "Fixture Other").key, observedAt: right.observedAt, kind: "inbox-preview", source: .kakao)
+                        let selection = Self.acceptsEvent(right, config: selected) && Self.acceptsEvent(second, config: selected) && Self.acceptsEvent(message, config: selected) && Self.acceptsEvent(kakao, config: selected) && !Self.acceptsEvent(wrong, config: selected) && !Self.acceptsEvent(right, config: disabled)
+                        let mode = (try? FileManager.default.attributesOfItem(atPath: self.paths.root.appendingPathComponent("sources.json").path)[.posixPermissions] as? NSNumber)?.intValue == 0o600
+                        finish(["prefilled": prefilled, "automaticInstagram": automaticInstagram, "clearedInstagram": clearedInstagram, "multipleTargets": multipleSaved, "mismatchedRejected": mismatchedRejected, "retainedOnAdd": retainedOnAdd, "invalidRejected": invalidRejected, "saved": saved,
+                            "sourceIsolation": isolated, "readerRecreated": recreated, "readMarksPreserved": marksPreserved,
+                            "blankDisabled": blankDisabled, "selectionGuard": selection, "privateMode": mode,
+                            "ok": prefilled && automaticInstagram && clearedInstagram && multipleSaved && mismatchedRejected && retainedOnAdd && invalidRejected && saved && isolated && recreated && marksPreserved && blankDisabled && selection && mode])
+                    }
+                }
+            }
+            form.save()
+        } catch { finish(["ok": false, "stage": 0]) }
+    }
+
+    /// Regression for the recorded wall gaps and folded image rows, without user data or visible windows.
+    private func checkPetGeometry(to output: URL) {
+        let view = CatView(frame: NSRect(origin: .zero, size: CatView.size))
+        let rect = view.spriteRect
+        var cases = 0, contact = true, continuous = true, coverage = true, inBounds = true, matchesBody = true
+        let cap = CatView.spriteHeight * CatView.maxTrail
+        for wall in 0..<4 {
+            for depth: CGFloat in [0.1, 0.35, 0.8] {
+                for held: CGFloat in [0, 0.1, 0.5, 0.9, 1] {
+                    for side: CGFloat in [-1, 0, 1] {
+                        for pull in [NSPoint(x: -cap, y: -cap), NSPoint(x: cap, y: cap), .zero] {
+                            var press: [CGFloat] = [0, 0, 0, 0]
+                            press[wall] = depth * (wall < 2 ? rect.width : rect.height)
+                            view.press(left: press[0], right: press[1], bottom: press[2], top: press[3], immediately: true)
+                            view.hold(at: held, side: side); view.setPull(pull)
+                            var area = NSRect(x: rect.midX - 720, y: rect.midY - 450, width: 1440, height: 900)
+                            // A full drag trail still separates the panel's sprite from the screen boundary.
+                            if wall == 0 { area.origin.x = rect.minX - cap }
+                            if wall == 1 { area.origin.x = rect.maxX + cap - area.width }
+                            if wall == 2 { area.origin.y = rect.minY - cap }
+                            if wall == 3 { area.origin.y = rect.maxY + cap - area.height }
+                            view.area = area
+                            let strips = view.strips(in: rect), body = view.bodyRect
+                            let edge = [body.minX - area.minX, body.maxX - area.maxX, body.minY - area.minY, body.maxY - area.maxY][wall]
+                            contact = contact && abs(edge) < 0.000001
+                            coverage = coverage && strips.first?.source.minY == 0 && abs((strips.last?.source.maxY ?? 0) - 1) < 0.000001
+                            var previous: CatView.Strip?
+                            for strip in strips {
+                                continuous = continuous && strip.destination.width > 0 && strip.destination.height > 0
+                                inBounds = inBounds && view.bounds.insetBy(dx: -0.001, dy: -0.001).contains(strip.destination)
+                                if let previous {
+                                    continuous = continuous && abs(previous.destination.maxY - strip.destination.minY) < 0.000001
+                                    coverage = coverage && abs(previous.source.maxY - strip.source.minY) < 0.000001
+                                }
+                                previous = strip
+                            }
+                            matchesBody = matchesBody && body == strips.reduce(NSRect.null) { $0.union($1.destination) }
+                            cases += 1
+                        }
+                    }
+                }
+            }
+        }
+        view.area = nil; view.press(left: 0, right: 0, bottom: 0, top: 0, immediately: true)
+        view.hold(at: 0.5); view.setPull(NSPoint(x: 15, y: 10))
+        let free = view.strips(in: rect)
+        let freePull = free.allSatisfy { strip in
+            let t = strip.source.minY, dy = (t - 0.5) * rect.height
+            let expected = rect.minY + rect.height * t + 10 * exp(-dy * dy / (2 * 60 * 60))
+            return abs(strip.destination.minY - expected) < 0.000001
+        }
+        var localRebound = true
+        for wall in 0..<4 {
+            var press: [CGFloat] = [0, 0, 0, 0]
+            press[wall] = 0.8 * (wall < 2 ? rect.width : rect.height)
+            view.press(left: press[0], right: press[1], bottom: press[2], top: press[3], immediately: true)
+            view.press(left: 0, right: 0, bottom: 0, top: 0)
+            view.setPull(.zero)
+            view.area = NSRect(x: -480, y: -682, width: 1440, height: 2046)
+            localRebound = localRebound && view.bounds.contains(view.bodyRect)
+        }
+        let report: [String: Any] = ["cases": cases, "contact": contact, "continuous": continuous, "sourceCoverage": coverage,
+            "insideView": inBounds, "bodyMatchesDrawing": matchesBody, "freePullPreserved": freePull,
+            "releaseReboundsLocally": localRebound,
+            "ok": contact && continuous && coverage && inBounds && matchesBody && freePull && localRebound]
+        do { try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output) }
+        catch { fputs("Could not save pet geometry report\n", stderr) }
+    }
+
+    /// Deliberately numeric-only. Runs the production reader with this app's signing identity.
+    private func measureLiveAccessibility() {
+        guard let config = try? SourcesConfig.load(paths: paths) else { print("[0]"); return }
+        var captures: [KakaoCaptureMetrics] = [], polls: [Double] = []
+        var statuses = Array(repeating: 0, count: 5)
+        let reader = KakaoReader(name: config.kakaoNames.first, captureMetrics: { captures.append($0) })
+        for _ in 0..<100 {
+            let started = ProcessInfo.processInfo.systemUptime
+            let batch = reader.poll(now: Date())
+            polls.append((ProcessInfo.processInfo.systemUptime - started) * 1000)
+            let index: Int
+            switch batch.status {
+            case .disabled: index = 0
+            case .idle: index = 1
+            case .observing: index = 2
+            case .permissionRequired: index = 3
+            case .unavailable: index = 4
+            }
+            statuses[index] += 1
+            reader.acknowledge(Set(batch.events.map(\.identity)))
+            usleep(100_000)
+        }
+        func summary(_ values: [Double]) -> [Double] {
+            let sorted = values.sorted()
+            guard !sorted.isEmpty else { return [0, 0, 0] }
+            return [sorted[(sorted.count - 1) / 2], sorted[Int(Double(sorted.count - 1) * 0.95)], sorted.last!]
+        }
+        var report: [Double] = [Double(polls.count)]
+        report.append(contentsOf: summary(polls))
+        report.append(contentsOf: summary(captures.map(\.milliseconds)))
+        report.append(Double(captures.filter(\.deadlineExceeded).count))
+        report.append(Double(captures.map(\.nodes).reduce(0, +)) / Double(max(1, captures.count)))
+        report.append(contentsOf: statuses.map { Double($0) })
+        if let data = try? JSONSerialization.data(withJSONObject: report), let output = String(data: data, encoding: .utf8) { print(output) }
+    }
+
+    /// Fake contacts only. Reused event IDs across sources exercise the source-qualified UI identity.
+    /// Preview only: nil = the usual samples; otherwise (kakao, instagram, messages) counts, interleaved in time.
+    private var fullDesk: (Int, Int, Int)?
+    private func fullSourceEvents(_ counts: (Int, Int, Int)) -> [PetEvent] {
+        let plan: [(PetSource, Int)] = [(.kakao, counts.0), (.instagram, counts.1), (.messages, counts.2)]
+        let texts = ["보고 싶다 ❤️", "ㅋㅋㅋ", "(릴스)", "오늘 저녁에 뭐 먹을래?", "자기가 결정해용", "(이미지)", "응응"]
+        var all: [(PetSource, Int)] = []
+        for round in 0..<7 { for (source, n) in plan where round < n { all.append((source, round)) } }
+        return all.enumerated().map { index, item in
+            let (source, n) = item
+            let key = source == .instagram ? "https://www.instagram.com/direct/t/fixture/"
+                : ConversationKey.local(source, identifier: source == .messages ? "fixture@example.invalid" : "fixture.friend").key
+            let label = source == .kakao ? "카톡" : source == .instagram ? "인스타" : "메시지"
+            return PetEvent(eventId: "full-\(source)-\(n)", sender: "fixture.sender", text: "\(label) \(n + 1) \(texts[(n + index) % texts.count])", threadUrl: key,
+                            observedAt: PetEvent.timestamp(Date().addingTimeInterval(Double(index - all.count) * 60)),
+                            kind: source == .kakao ? "inbox-preview" : "thread-message", source: source)
+        }
+    }
+
+    private func mixedSourceEvents() -> [PetEvent] {
+        let samples: [(PetSource, String, String)] = [
+            (.instagram, "mixed-1", "Instagram 1 · 사진이 도착했어요"),
+            (.messages, "mixed-1", "Messages 1 · 안녕!"),
+            (.instagram, "mixed-2", "Instagram 2 · (릴스)"),
+            (.messages, "mixed-2", "Messages 2 · 조금 뒤에 만나요"),
+            (.kakao, "mixed-1", "KakaoTalk · 새 메시지 예시")
+        ]
+        return samples.enumerated().map { index, sample in
+            let (source, id, text) = sample
+            let key = source == .instagram ? "https://www.instagram.com/direct/t/fixture/"
+                : ConversationKey.local(source, identifier: source == .messages ? "fixture@example.invalid" : "fixture.friend").key
+            return PetEvent(eventId: id, sender: "fixture.sender", text: text, threadUrl: key,
+                            observedAt: PetEvent.timestamp(Date().addingTimeInterval(Double(index - samples.count) * 60)),
+                            kind: source == .kakao ? "inbox-preview" : "thread-message", source: source)
+        }
+    }
+
+    /// Exercise real read removal and queue backpressure with synthetic sources in the isolated test home.
+    private func checkSourceReads(to output: URL) {
+        buildPanel()
+        buildMenu()
+        statusItem.isVisible = false
+        let events = mixedSourceEvents()
+        recent = Array(events.dropLast())
+        current = events.last
+        pending = PetSource.allCases.compactMap { source in
+            guard let sample = events.first(where: { $0.source == source }) else { return nil }
+            return PetEvent(eventId: "waiting", sender: sample.sender, text: sample.text,
+                            threadUrl: sample.threadUrl, observedAt: sample.observedAt, kind: sample.kind, source: source)
+        }
+        bubble.show(events)
+        func shown() -> [PetEvent] { recent + [current].compactMap { $0 } }
+        var counts = [shown().count], waiting = [pending.count]
+        var sourcesAfterKakao: [String] = []
+        for source in [PetSource.kakao, .messages, .instagram] {
+            guard let conversation = events.first(where: { $0.source == source })?.conversation else { continue }
+            var marks = readMarks
+            marks[conversation] = Date()
+            applyReads(marks)
+            counts.append(shown().count)
+            waiting.append(pending.count)
+            if source == .kakao { sourcesAfterKakao = shown().map { $0.source.rawValue } }
+        }
+        let distinct = Set(events.map(\.identity)).count == events.count
+        let previousMarks = readMarks
+        applyReads([:]) // an older in-flight disk snapshot cannot undo a click/read watermark
+        let monotonicReads = readMarks == previousMarks
+        // A delayed, older Instagram delivery joins at the oldest end (Instagram has room) and evicts none of the others.
+        recent = Array(events.dropLast()); current = events.last
+        let delayed = PetEvent(eventId: "late-old", sender: "fixture.sender", text: "synthetic",
+            threadUrl: events[0].threadUrl, observedAt: PetEvent.timestamp(Date().addingTimeInterval(-3600)), kind: "thread-message")
+        let orderPreserved = rememberForDisplay(delayed).map(\.identity) == ([delayed] + events).map(\.identity)
+        recent = []; current = nil
+        let capacityRecovery = checkSourceCapacity()
+        let report: [String: Any] = [
+            "version": 1, "visibleCounts": counts, "pendingCounts": waiting,
+            "sourcesAfterKakaoRead": sourcesAfterKakao, "sourceIdentitiesDistinct": distinct,
+            "capacityRecovery": capacityRecovery,
+            "orderPreserved": orderPreserved,
+            "monotonicReads": monotonicReads,
+            "ok": counts == [5, 4, 2, 0] && waiting == [3, 2, 1, 0] && distinct && bubble.isHidden && capacityRecovery && orderPreserved && monotonicReads
+        ]
+        do {
+            try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
+            print("Source read smoke report: \(output.path)")
+        } catch { fputs("Could not save source read smoke report\n", stderr) }
+    }
+
+    private func checkSourceCapacity() -> Bool {
+        // Never use the user's queue when a smoke flag is invoked without an isolated home.
+        let resolved = paths.root.resolvingSymlinksInPath().path
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
+        guard ProcessInfo.processInfo.environment["INSTAGRAMPET_HOME"] != nil,
+              resolved.hasPrefix(temporary + "/") || resolved.hasPrefix("/private/tmp/") else { return false }
+        final class FixtureReader: LocalSourceReader {
+            let source = PetSource.messages
+            let value: PetEvent
+            var accepted = Set<String>()
+            init(_ value: PetEvent) { self.value = value }
+            func poll(now: Date) -> SourcePoll { SourcePoll(events: [value], status: .observing) }
+            func acknowledge(_ identities: Set<String>) { accepted.formUnion(identities) }
+        }
+        queue = EventQueue(paths: paths)
+        defer { try? queue.clear(); localReaders = [] }
+        do {
+            guard try queue.count() == 0 else { return false }
+            var first: PetEvent?
+            for index in 0..<EventQueue.capacity {
+                let e = PetEvent(eventId: "capacity-\(index)", sender: "fixture.sender", text: "synthetic",
+                    threadUrl: "https://www.instagram.com/direct/t/fixture/", observedAt: PetEvent.timestamp(), kind: "thread-message")
+                if first == nil { first = e }
+                try queue.enqueue(e)
+            }
+            let value = PetEvent(eventId: "capacity-local", sender: "messages.contact", text: "synthetic",
+                threadUrl: ConversationKey.local(.messages, identifier: "fixture@example.invalid").key,
+                observedAt: PetEvent.timestamp(), kind: "thread-message", source: .messages)
+            let reader = FixtureReader(value)
+            localReaders = [reader]; lastSourcesPoll = .distantPast
+            _ = try pollLocalSources()
+            guard reader.accepted.isEmpty, try queue.pending().count == EventQueue.capacity else { return false }
+            try queue.consume(first!)
+            lastSourcesPoll = .distantPast
+            _ = try pollLocalSources()
+            let remaining = try queue.count()
+            return reader.accepted == [value.identity] && remaining == EventQueue.capacity
+        } catch { return false }
+    }
+
     private final class Desk: NSView {
         override func draw(_ dirtyRect: NSRect) {
             NSColor(calibratedRed: 0.86, green: 0.89, blue: 0.93, alpha: 1).setFill(); bounds.fill()
@@ -1333,10 +2171,10 @@ final class PetController: NSObject, NSApplicationDelegate {
     }
 
     /// Renders the pet and five bubbles on a fake 1440×900 desktop with the cat at `catOrigin`.
-    private enum DeskMode { case normal, bubblesHidden, petHidden, moving, pushing, tucked, crowded, squashRight, squashBottom, headRight, headUp, waistRight, bagRight, handLeft, headDown, feetUp, bagLeft, rightFoot, shoulder, knee }
+    private enum DeskMode { case normal, mixed, mixedRead, bubblesHidden, petHidden, moving, pushing, tucked, crowded, squashRight, squashBottom, headRight, headUp, waistRight, bagRight, handLeft, headDown, feetUp, bagLeft, rightFoot, shoulder, knee, bottomContact, topContact, leftContact, rightContact, bottomDeepPull, topDeepPull, leftDeepPull, rightDeepPull }
 
     private func renderDesk(catOrigin: NSPoint, mode: DeskMode, to output: URL) {
-        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900), area = NSRect(x: 0, y: 0, width: 1440, height: 875)
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900), area = screen
         let desk = Desk(frame: screen)
         desk.appearance = NSAppearance(named: .aqua)
         // `catOrigin` is in the old 200×390 layout (sprite at +32.65, +4); place the sprite at the same spot.
@@ -1350,6 +2188,12 @@ final class PetController: NSObject, NSApplicationDelegate {
         let long = (1...40).map(String.init).joined()
         let samples = mode == .crowded ? [(long, -4), (long, -3), (long, -2), (long, -1), (long, 0)]
             : [("1 (이미지)", -20), ("2 보고 싶다 ❤️", -14), ("3 ㅋㅋㅋ", -9), ("4 (릴스)", -4), ("5 오늘 저녁에 뭐 먹을래? 나는 떡볶이 먹고 싶어!", 0)]
+        var events = fullDesk.map(fullSourceEvents) ?? ((mode == .mixed || mode == .mixedRead) ? mixedSourceEvents()
+            : samples.compactMap { demoEvent(text: $0.0, minutesAgo: $0.1) })
+        if mode == .mixedRead {
+            let marks = [ConversationKey.local(.kakao, identifier: "fixture.friend"): Date()]
+            events.removeAll { $0.conversation.isRead(observedAt: $0.observedAt, in: marks) }
+        }
         hideBubblesUntil = mode == .bubblesHidden ? Date().addingTimeInterval(23 * 60) : nil
         hidePetUntil = mode == .petHidden ? Date().addingTimeInterval(37 * 60) : nil
         tuckedUntil = mode == .tucked ? Date().addingTimeInterval(52 * 60) : nil
@@ -1357,15 +2201,30 @@ final class PetController: NSObject, NSApplicationDelegate {
         cat.isHidden = mode == .petHidden || mode == .tucked
         if mode == .bubblesHidden || mode == .petHidden {
             bubble.isHidden = true
-            pending = samples.compactMap { demoEvent(text: $0.0, minutesAgo: $0.1) }
+            pending = events
         } else {
             pending = []
-            bubble.show(samples.compactMap { demoEvent(text: $0.0, minutesAgo: $0.1) })
+            bubble.show(events)
         }
         arrowKey = ""
         cat.area = area.offsetBy(dx: -cat.frame.minX, dy: -cat.frame.minY)
         if mode == .squashRight { cat.press(left: 0, right: 95, bottom: 0, top: 0, immediately: true) }
         if mode == .squashBottom { cat.press(left: 0, right: 0, bottom: 230, top: 0, immediately: true) }
+        let edgePulls: [DeskMode: (CGFloat, CGFloat, CGFloat, CGFloat, CGFloat, CGFloat, NSPoint)] = [
+            .bottomContact: (0, 0, 120, 0, 0.9, 0, NSPoint(x: 0, y: -50)),
+            .topContact: (0, 0, 0, 120, 0.1, 0, NSPoint(x: 0, y: 50)),
+            .leftContact: (55, 0, 0, 0, 0.5, 0.8, NSPoint(x: -50, y: 0)),
+            .rightContact: (0, 55, 0, 0, 0.5, -0.8, NSPoint(x: 50, y: 0)),
+            .bottomDeepPull: (0, 0, 270, 0, 0.9, 0, NSPoint(x: 0, y: -50)),
+            .topDeepPull: (0, 0, 0, 270, 0.1, 0, NSPoint(x: 0, y: 50)),
+            .leftDeepPull: (105, 0, 0, 0, 0.5, 0.8, NSPoint(x: -50, y: 0)),
+            .rightDeepPull: (0, 105, 0, 0, 0.5, -0.8, NSPoint(x: 50, y: 0))
+        ]
+        if let edge = edgePulls[mode] {
+            cat.press(left: edge.0, right: edge.1, bottom: edge.2, top: edge.3, immediately: true)
+            cat.hold(at: edge.4, side: edge.5)
+            cat.setPull(edge.6)
+        }
         place(pet: cat.bodyRect.offsetBy(dx: cat.frame.minX, dy: cat.frame.minY), area: area, animated: false)
         if mode == .crowded {
             // Long messages crowded into a corner while the pet is dragged down into it.
@@ -1409,6 +2268,8 @@ final class PetController: NSObject, NSApplicationDelegate {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let scenarios: [(String, NSPoint, DeskMode)] = [
             ("1-center", NSPoint(x: 620, y: 200), .normal),
+            ("1b-mixed-sources", NSPoint(x: 620, y: 200), .mixed),
+            ("1c-mixed-after-kakao-read", NSPoint(x: 620, y: 200), .mixedRead),
             ("2-bottom-right-corner", NSPoint(x: 1272.6, y: -4), .normal),
             ("3-top-left-corner", NSPoint(x: -32.6, y: 533), .normal),
             ("4-top-center", NSPoint(x: 620, y: 533), .normal),
@@ -1444,14 +2305,36 @@ final class PetController: NSObject, NSApplicationDelegate {
             ("21-held-by-right-foot-dragged-right", NSPoint(x: 500, y: 200), .rightFoot),
             ("22-held-by-shoulder-dragged-right", NSPoint(x: 500, y: 200), .shoulder),
             ("23-held-by-knee-dragged-right", NSPoint(x: 500, y: 200), .knee),
+            ("24-bottom-contact-while-body-trails", NSPoint(x: 620, y: 46), .bottomContact),
+            ("25-top-contact-while-body-trails", NSPoint(x: 620, y: 508), .topContact),
+            ("26-left-contact-while-body-trails", NSPoint(x: 17.35, y: 200), .leftContact),
+            ("27-right-contact-while-body-trails", NSPoint(x: 1222.65, y: 200), .rightContact),
+            ("28-bottom-deep-press-pulling-head", NSPoint(x: 620, y: 46), .bottomDeepPull),
+            ("29-top-deep-press-pulling-feet", NSPoint(x: 620, y: 508), .topDeepPull),
+            ("30-left-deep-press-pulling-bag", NSPoint(x: 17.35, y: 200), .leftDeepPull),
+            ("31-right-deep-press-pulling-hand", NSPoint(x: 1222.65, y: 200), .rightDeepPull),
         ]
         for (name, origin, mode) in scenarios {
             renderDesk(catOrigin: origin, mode: mode, to: directory.appendingPathComponent("\(name).png"))
         }
+        // Per-app cap: Kakao 1 + Messages 1 + seven Instagram keeps 1 + 1 + 4.
+        let kept = Orbit.capped(fullSourceEvents((1, 7, 1)))
+        precondition(kept.count == 6 && kept.filter { $0.source == .instagram }.count == 4
+                     && kept.contains { $0.source == .kakao } && kept.contains { $0.source == .messages }, "per-source cap")
+        precondition(Orbit.capped(fullSourceEvents((7, 7, 7))).count == 12, "total cap")
+        let full = scenarios.filter { ["1-center", "2-bottom-right-corner", "3-top-left-corner", "4-top-center", "4b-top-right-corner",
+                                       "4c-bottom-left-corner", "4d-left-edge-middle"].contains($0.0) || $0.2 == .tucked }
+        for (counts, tag) in [((4, 4, 4), "12"), ((1, 7, 1), "kakao1-ig7-msg1")] {
+            fullDesk = counts
+            for (name, origin, mode) in full {
+                renderDesk(catOrigin: origin, mode: mode, to: directory.appendingPathComponent("F\(tag)-\(name).png"))
+            }
+        }
+        fullDesk = nil
     }
 
     private func finishSmokeTest() {
-        guard let output = smokeReport, !smokeFinishing else { return }
+        guard smokeBurstCount == nil, let output = smokeReport, !smokeFinishing else { return }
         smokeFinishing = true
         // This runs after the consume already enqueued by present(), on the same serial queue.
         io.async { [weak self] in
@@ -1476,7 +2359,7 @@ final class PetController: NSObject, NSApplicationDelegate {
     @objc private func clearMessages() {
         queueGeneration += 1
         pending.removeAll(); current = nil; recent.removeAll()
-        bubbleTimer?.invalidate(); bubble.isHidden = true; cat.excited = false
+        bubble.isHidden = true; cat.excited = false
         io.async { [weak self] in
             guard let self, let queue = self.queue else { return }
             try? queue.clear()
@@ -1493,12 +2376,48 @@ final class PetController: NSObject, NSApplicationDelegate {
     }
 
     private func openConversation(_ event: PetEvent) {
-        guard (try? event.validate()) != nil else { return }
-        // Demo bubbles never pretend that the artificial thread exists.
-        let link = event.kind == "test" ? "https://www.instagram.com/direct/inbox/" : event.threadUrl
-        guard let url = URL(string: link) else { return }
-        openURLInChrome(url)
-        if event.kind == "test" { dismissCurrent() } else { markRead(event.threadUrl) }
+        guard let destination = event.destination(messagesHandle: sourceConfig.messages?.handle) else {
+            lastError = "Conversation unavailable · check sources.json"
+            updateStatus()
+            return
+        }
+        switch destination {
+        case .instagram(let url):
+            openURLInChrome(url)
+        case .messages(let url):
+            guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.MobileSMS") else {
+                lastError = "Messages is not installed"
+                updateStatus()
+                return
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.open([url], withApplicationAt: app, configuration: configuration) { [weak self] _, error in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if error == nil { self.markRead(event.conversation) }
+                    else { self.lastError = "Could not open Messages"; self.updateStatus() }
+                }
+            }
+            return
+        case .kakao:
+            guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.kakao.KakaoTalkMac") else {
+                lastError = "KakaoTalk is not installed"
+                updateStatus()
+                return
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.openApplication(at: app, configuration: configuration) { [weak self] _, error in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if error == nil { self.markRead(event.conversation) }
+                    else { self.lastError = "Could not open KakaoTalk"; self.updateStatus() }
+                }
+            }
+            return
+        }
+        if event.kind == "test" { dismissCurrent() } else { markRead(event.conversation) }
     }
 
     @objc private func openInbox() { openURLInChrome(URL(string: "https://www.instagram.com/direct/inbox/")!) }
@@ -1510,13 +2429,18 @@ final class PetController: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set([sprite.minX, sprite.minY], forKey: "pet.sprite.origin")
     }
 
-    @objc private func screenChanged() { clampPosition(); persistPosition() }
+    @objc private func screenChanged() {
+        petTarget = nil; petDragArea = nil
+        cat.setPull(.zero)
+        cat.press(left: 0, right: 0, bottom: 0, top: 0)
+        clampPosition(); persistPosition()
+    }
 
     private func trimKnownIDs() {
         guard knownOrder.count > 1024 else { return }
         knownOrder = Array(knownOrder.suffix(512))
-        knownIDs = Set(knownOrder).union(pending.map(\.eventId))
-        if let current { knownIDs.insert(current.eventId) }
+        knownIDs = Set(knownOrder).union(pending.map(\.identity))
+        if let current { knownIDs.insert(current.identity) }
     }
 
     /// Shown bubbles expire on their own only after 12 hours.
@@ -1527,12 +2451,12 @@ final class PetController: NSObject, NSApplicationDelegate {
         pending.removeAll { (PetEvent.date($0.observedAt) ?? .distantPast) < cutoff }
         let stale = Date().addingTimeInterval(-Self.bubbleLifetime)
         func old(_ event: PetEvent) -> Bool { (PetEvent.date(event.observedAt) ?? .distantPast) < stale }
-        let before = (recent + [current].compactMap { $0 }).map(\.eventId)
+        let before = (recent + [current].compactMap { $0 }).map(\.identity)
         recent.removeAll(where: old)
         if let event = current, old(event) { current = recent.popLast() }
         let still = recent + [current].compactMap { $0 }
-        guard still.map(\.eventId) != before else { return }
-        if still.isEmpty { bubbleTimer?.invalidate(); bubble.isHidden = true; cat.excited = false }
+        guard still.map(\.identity) != before else { return }
+        if still.isEmpty { bubble.isHidden = true; cat.excited = false }
         else if !bubble.isHidden { bubble.show(still) }
     }
 
@@ -1563,6 +2487,7 @@ final class PetController: NSObject, NSApplicationDelegate {
         let left = max(0, area.minX - sprite.minX), right = max(0, sprite.maxX - area.maxX)
         let bottom = max(0, area.minY - sprite.minY), top = max(0, sprite.maxY - area.maxY)
         petTarget = NSPoint(x: origin.x + left - right, y: origin.y + bottom - top)
+        petDragArea = area
         cat.press(left: left, right: right, bottom: bottom, top: top)
         lastPress = (left, right, bottom, top)
         followPet(step: 0) // re-pull at the mouse's own event rate, not just on the 20 fps tick
@@ -1583,11 +2508,18 @@ final class PetController: NSObject, NSApplicationDelegate {
         }
         if hypot(gap.x, gap.y) < 0.3 && !cat.isDragging { origin = target; gap = .zero }
         if origin != panel.frame.origin { panel.setFrameOrigin(origin) }
+        updatePetArea()
         cat.setPull(gap)
         if gap == .zero && !cat.isDragging {
-            petTarget = nil
+            petTarget = nil; petDragArea = nil
             clampPosition(); persistPosition()
         }
+    }
+
+    /// Panel motion and screen-local wall coordinates must change in the same mouse event.
+    private func updatePetArea() {
+        guard let area = petDragArea ?? catScreen()?.frame else { return }
+        cat.area = area.offsetBy(dx: -panel.frame.minX - cat.frame.minX, dy: -panel.frame.minY - cat.frame.minY)
     }
 
     private func droppedPet() {
@@ -1597,7 +2529,7 @@ final class PetController: NSObject, NSApplicationDelegate {
         cat.press(left: 0, right: 0, bottom: 0, top: 0)
         if corner {
             if let target = petTarget { panel.setFrameOrigin(target) }
-            petTarget = nil
+            petTarget = nil; petDragArea = nil
             cat.setPull(.zero)
             // Slip just past the corner, so the arrow and incoming bubbles huddle right in it.
             let sprite = catSpriteOnScreen()
@@ -1610,6 +2542,7 @@ final class PetController: NSObject, NSApplicationDelegate {
             arrowKey = ""
             updateStatus()
         } else if petTarget == nil {
+            petDragArea = nil
             clampPosition()
             persistPosition()
         } // otherwise the body finishes catching up on the tick, then clamps and saves
@@ -1634,6 +2567,7 @@ final class PetController: NSObject, NSApplicationDelegate {
         let x = min(max(sprite.minX, area.minX - sprite.width + keepX), area.maxX - keepX)
         let y = min(max(sprite.minY, area.minY - sprite.height + keepY), area.maxY - keepY)
         panel.setFrameOrigin(NSPoint(x: panel.frame.minX + x - sprite.minX, y: panel.frame.minY + y - sprite.minY))
+        updatePetArea()
     }
 }
 
@@ -1642,3 +2576,7 @@ app.setActivationPolicy(.accessory)
 let controller = PetController()
 app.delegate = controller
 app.run()
+
+// shortcut: private WindowServer SPI (widely used by cursor/pet apps); if a macOS update removes it, the hand shows only while the app is active.
+@_silgen_name("_CGSDefaultConnection") func _CGSDefaultConnection() -> Int32
+@_silgen_name("CGSSetConnectionProperty") func CGSSetConnectionProperty(_ cid: Int32, _ target: Int32, _ key: CFString, _ value: CFTypeRef) -> Int32

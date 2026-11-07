@@ -10,7 +10,7 @@ function worker() {
     storage:{local:{get:async keys=>{keys=Array.isArray(keys)?keys:[keys];return Object.fromEntries(keys.map(k=>[k,structuredClone(data[k])]))},set:async obj=>Object.assign(data,structuredClone(obj)),remove:async keys=>{for(const key of keys)delete data[key];}},onChanged:emptyEvent},
     alarms:{create(){},onAlarm:emptyEvent},
     tabs:{query:async q=>(assert.ok(q.url.every(u=>u.includes('instagram.com'))),[{id:7}]),onCreated:emptyEvent,onRemoved:emptyEvent,onUpdated:emptyEvent},scripting:{executeScript:async o=>{injected.push(o);}}};
-  const context=vm.createContext({chrome,URL,setTimeout,clearTimeout,console,crypto:require('node:crypto').webcrypto});
+  const context=vm.createContext({chrome,URL,setTimeout,clearTimeout,setInterval(){},console,crypto:require('node:crypto').webcrypto});
   context.importScripts=(...files)=>files.forEach(file=>vm.runInContext(fs.readFileSync(path.join(__dirname,'..',file),'utf8'),context,{filename:file}));
   vm.runInContext(fs.readFileSync(path.join(__dirname,'..','service-worker.js'),'utf8'),context,{filename:'service-worker.js'});
   return {data,installed:r=>installed(r),injected,send:(message,sender)=>new Promise(resolve=>{const result=listener(message,sender,resolve);assert.equal(result,true);})};
@@ -22,7 +22,7 @@ test('worker rejects foreign extension ID, origin, scheme, and subframe',async()
   assert.equal(w.data.pending,undefined);
 });
 test('Instagram content cannot invoke demo or extension management actions',async()=>{
-  const w=worker();for(const type of ['pet.test','pet.clear','pet.ping','pet.status'])assert.equal((await w.send({type},sender())).ok,false);
+  const w=worker();for(const type of ['pet.test','pet.clear','pet.ping','pet.status','pet.config.sync','pet.settings.save'])assert.equal((await w.send({type},sender())).ok,false);
 });
 test('root Instagram page may report metadata but may not submit observations',async()=>{
   const w=worker(),s=sender({url:'https://www.instagram.com/'});

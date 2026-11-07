@@ -2,7 +2,7 @@
   "use strict";
   const C = PetCommon, D = PetDetector;
   const tracker = new D.Tracker(), outbox = new Map();
-  let readSent = false, config = C.settings(), timer = null, lastPath = "", lastScan = 0, stopped = false, lastDiagnostic = 0, running = false, rerun = false;
+  let readSent = false, config = C.settings(), scheduled = false, lastPath = "", lastScan = 0, stopped = false, lastDiagnostic = 0, running = false, rerun = false;
   const metadata = { scans: 0, observations: 0, sendErrors: 0, dropped: 0 };
   function send(message) {
     return new Promise(resolve => {
@@ -15,8 +15,11 @@
     });
   }
   function schedule() {
-    if (stopped || timer) return;
-    timer = setTimeout(() => { timer = null; scan(); }, 250);
+    if (stopped || scheduled) return;
+    scheduled = true;
+    // Mutations already arrive as a batch. Do not put an actual DOM change behind a
+    // background-tab timer, which Chrome can align to seconds or minutes.
+    queueMicrotask(() => { scheduled = false; scan(); });
   }
   async function scan() {
     if (stopped) return;
@@ -69,6 +72,7 @@
   addEventListener("focus", schedule);
   addEventListener("blur", schedule);
   document.addEventListener("visibilitychange", schedule);
+  document.addEventListener("resume", schedule);
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.settings) { config = C.settings(changes.settings.newValue); tracker.reset(); outbox.clear(); schedule(); }
   });

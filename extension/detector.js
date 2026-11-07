@@ -226,9 +226,10 @@
         const oldKeys = this.keys;
         const oldTail = this.lastTail, oldHead = this.lastHead, oldTailNode = this.lastTailNode;
         this.threadId = view.id;
-        // A bubble with no readable content yet (e.g. a reel still loading its thumbnail) changes key
-        // once it hydrates; letting it be the tail would rebaseline and swallow that message.
-        const rows = view.rows.filter(r => r.text || !r.incoming);
+        // Content and sender/direction can hydrate in separate DOM mutations. An incomplete
+        // incoming row must not move the tail before it is safe to deliver; outgoing rows
+        // still anchor the transcript so the user's own replies never become notifications.
+        const rows = view.rows.filter(r => r.outgoing || (r.incoming && r.sender && r.text));
         this.keys = new Set(rows.map(r => r.key));
         this.lastTail = rows[rows.length - 1]?.key || null;
         this.lastTailNode = rows[rows.length - 1]?.node || null;

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test the actual Swift executable over Chrome's framed stdin/stdout. No account/GUI needed."""
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -60,6 +61,112 @@ class NativeBridgeTests(unittest.TestCase):
         value.update(changes)
         return value
 
+    def test_config_only_returns_validated_instagram_selection(self):
+        selected = {'username': ' @Fixture.Friend ', 'threadId': ' 123456 '}
+        (self.root / 'sources.json').write_text(json.dumps({
+            'instagram': selected, 'messages': {'handle': 'private-fixture@example.test'},
+            'kakao': {'name': 'PRIVATE_CONTACT_CANARY'}
+        }))
+        result = self.run_host(frame({'version': 1, 'type': 'config'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(unpack(result.stdout), [{
+            'version': 1, 'type': 'config', 'ok': True,
+            'instagram': {'username': 'fixture.friend', 'threadId': '123456'}
+        }])
+        self.assertEqual(result.stderr, b'')
+        self.assertNotIn(b'private-fixture', result.stdout)
+        self.assertNotIn(b'PRIVATE_CONTACT_CANARY', result.stdout + result.stderr)
+
+    def test_config_distinguishes_unmanaged_and_explicitly_disabled(self):
+        unmanaged = self.run_host(frame({'version': 1, 'type': 'config'}))
+        self.assertEqual(unpack(unmanaged.stdout)[0]['instagram'], None)
+        (self.root / 'sources.json').write_text(json.dumps({'instagram': None}))
+        explicit_null = self.run_host(frame({'version': 1, 'type': 'config'}))
+        self.assertEqual(unpack(explicit_null.stdout)[0]['instagram'], None)
+        (self.root / 'sources.json').write_text(json.dumps({'instagram': {'username': '', 'threadId': ''}}))
+        disabled = self.run_host(frame({'version': 1, 'type': 'config'}))
+        self.assertEqual(unpack(disabled.stdout)[0]['instagram'], {'username': '', 'threadId': ''})
+
+    def test_config_returns_canonical_multiple_instagram_pairs_without_local_contacts(self):
+        (self.root / 'sources.json').write_text(json.dumps({
+            'instagram': {'username': ' @Fixture.One, Fixture.Two, @Fixture.One ', 'threadId': ' 123, 456, 789 '},
+            'messages': {'handle': 'PRIVATE_FIRST@example.test,PRIVATE_SECOND@example.test'},
+            'kakao': {'name': 'PRIVATE_CONTACT_ONE,PRIVATE_CONTACT_TWO'}
+        }))
+        result = self.run_host(frame({'version': 1, 'type': 'config'}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(unpack(result.stdout), [{
+            'version': 1, 'type': 'config', 'ok': True,
+            'instagram': {'username': 'fixture.one,fixture.two,fixture.one', 'threadId': '123,456,789'}
+        }])
+        self.assertEqual(result.stderr, b'')
+        self.assertNotIn(b'PRIVATE_', result.stdout + result.stderr)
+
+    def test_config_rejects_invalid_csv_pairs_without_echoing_partial_selections(self):
+        for selected in ({'username': 'fixture.one,fixture.two', 'threadId': '123'},
+                         {'username': 'fixture.one,', 'threadId': '123,456'},
+                         {'username': 'fixture.one,,fixture.two', 'threadId': '123,456,789'},
+                         {'username': 'fixture.one,fixture.two', 'threadId': '123,123'},
+                         {'username': 'fixture.one,PRIVATE_USERNAME_CANARY bad', 'threadId': '123,456'},
+                         {'username': ','.join('fixture' + str(i) for i in range(101)),
+                          'threadId': ','.join(str(i + 1) for i in range(101))}):
+            (self.root / 'sources.json').write_text(json.dumps({'instagram': selected}))
+            result = self.run_host(frame({'version': 1, 'type': 'config'}) + frame({'version': 1, 'type': 'ping'}))
+            self.assertEqual([reply['type'] for reply in unpack(result.stdout)], ['error', 'pong'])
+            self.assertNotIn(b'fixture.one', result.stdout + result.stderr)
+            self.assertNotIn(b'PRIVATE_USERNAME_CANARY', result.stdout + result.stderr)
+
+    def test_config_rejects_invalid_values_and_payload_overrides_without_echoing(self):
+        for selected in ({'username': 'PRIVATE_USERNAME_CANARY bad', 'threadId': '123'},
+                         {'username': 'fixture.friend', 'threadId': 'not-a-thread'},
+                         {'username': 'fixture.friend', 'threadId': '1' * 129},
+                         {'username': '', 'threadId': '123'}, {'username': '@', 'threadId': ''},
+                         {'username': 'fixture.friend', 'threadId': 123}):
+            (self.root / 'sources.json').write_text(json.dumps({'instagram': selected}))
+            result = self.run_host(frame({'version': 1, 'type': 'config'}) + frame({'version': 1, 'type': 'ping'}))
+            self.assertEqual([reply['type'] for reply in unpack(result.stdout)], ['error', 'pong'])
+            self.assertNotIn(b'PRIVATE_USERNAME_CANARY', result.stdout + result.stderr)
+            self.assertNotIn(b'not-a-thread', result.stdout + result.stderr)
+        (self.root / 'sources.json').unlink()
+        result = self.run_host(frame({'version': 1, 'type': 'config', 'instagram': {'username': 'fixture.friend', 'threadId': '123'}}))
+        self.assertEqual(unpack(result.stdout)[0]['type'], 'error')
+        (self.root / 'sources.json').symlink_to(self.root / 'config.json')
+        result = self.run_host(frame({'version': 1, 'type': 'config'}))
+        self.assertEqual(unpack(result.stdout)[0]['type'], 'error')
+
+    def test_config_is_reloaded_on_each_request_of_one_connection(self):
+        source = self.root / 'sources.json'
+        source.write_text(json.dumps({'instagram': {'username': 'fixture.one', 'threadId': '123'}}))
+        process = subprocess.Popen([str(HOST), ORIGIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env=self.env)
+        try:
+            def request_config():
+                process.stdin.write(frame({'version': 1, 'type': 'config'}))
+                process.stdin.flush()
+                header = process.stdout.read(4)
+                self.assertEqual(len(header), 4)
+                return json.loads(process.stdout.read(struct.unpack('=I', header)[0]))
+            self.assertEqual(request_config()['instagram']['username'], 'fixture.one')
+            staged = self.root / '.sources-staged'
+            staged.write_text(json.dumps({'instagram': {'username': 'fixture.two', 'threadId': '456'}}))
+            staged.replace(source)
+            self.assertEqual(request_config()['instagram'], {'username': 'fixture.two', 'threadId': '456'})
+            process.stdin.close(); process.stdin = None
+            output, errors = process.communicate(timeout=15)
+            self.assertEqual(process.returncode, 0, errors)
+            self.assertEqual(output, b'')
+            self.assertEqual(errors, b'')
+        finally:
+            if process.poll() is None: process.kill(); process.communicate(timeout=5)
+
+    def test_config_requires_the_registered_extension_origin(self):
+        (self.root / 'sources.json').write_text(json.dumps({'instagram': {'username': 'fixture.friend', 'threadId': '123'}}))
+        for origin in ('chrome-extension://' + 'b' * 32 + '/', ORIGIN + '?other', None):
+            result = self.run_host(frame({'version': 1, 'type': 'config'}), origin=origin)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, b'')
+            self.assertNotIn(b'fixture.friend', result.stderr)
+
     def test_ping_unicode_delivery_replay_and_stdout_clean(self):
         result = self.run_host(frame({'version': 1, 'type': 'ping'}) + frame(self.event()) + frame(self.event()))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -104,6 +211,19 @@ class NativeBridgeTests(unittest.TestCase):
         result = self.run_host(struct.pack('=I', len(malformed)) + malformed + frame({'version': 1, 'type': 'ping'}))
         self.assertEqual(result.returncode, 0)
         self.assertEqual([x['type'] for x in unpack(result.stdout)], ['error', 'pong'])
+
+    def test_chrome_cannot_inject_local_sources_or_local_read_marks(self):
+        requests = []
+        for source in ('kakao', 'messages'):
+            key = source + ':' + hashlib.sha256(b'fixture-contact').hexdigest()
+            requests.append(self.event(source=source, threadUrl=key))
+            requests.append({'version': 1, 'type': 'read', 'source': source,
+                             'threadUrl': 'https://www.instagram.com/direct/t/123/'})
+        requests.append(self.event(source='instagram'))
+        result = self.run_host(b''.join(map(frame, requests)))
+        self.assertEqual([x['type'] for x in unpack(result.stdout)], ['error'] * 4 + ['ack'])
+        self.assertEqual(len(list((self.root / 'inbox').glob('*.json'))), 1)
+        self.assertEqual(list((self.root / 'reads').glob('*.json')), [])
 
     def test_bad_framing_stops_safely(self):
         for payload in (b'\x01\x02', struct.pack('=I', 65537), struct.pack('=I', 0), struct.pack('=I', 100) + b'{}'):

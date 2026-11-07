@@ -78,13 +78,23 @@ do {
             if type == "ping" {
                 try response(["version": 1, "type": "pong", "ok": true, "queueDepth": try queue.count(),
                     "appInstalled": FileManager.default.fileExists(atPath: config.appPath)])
+            } else if type == "config" {
+                guard Set(request.keys) == Set(["version", "type"]) else { throw PetError.invalid("configuration request") }
+                // Re-read on every request: this connection may outlive edits made in the app.
+                // SourcesConfig validates each comma-separated pair; no other contact data crosses this boundary.
+                let selected = try SourcesConfig.load(paths: paths).instagram
+                var instagram: Any = NSNull()
+                if let selected { instagram = ["username": selected.username, "threadId": selected.threadId] }
+                try response(["version": 1, "type": "config", "ok": true, "instagram": instagram])
             } else if type == "dm" {
                 let event = try JSONDecoder().decode(PetEvent.self, from: payload)
+                guard event.source == .instagram else { throw PetError.invalid("Chrome source") }
                 let isNew = try queue.enqueue(event)
                 try response(["version": 1, "type": "ack", "eventId": event.eventId, "ok": true, "queued": true])
                 // A retry of an accepted event need not re-open the app after the user has quit it.
                 if isNew { launchPetIfConfigured() }
             } else if type == "read" {
+                guard request["source"] == nil || request["source"] as? String == "instagram" else { throw PetError.invalid("Chrome source") }
                 // Only a validated thread URL is stored; the host's own clock decides what counts as read.
                 guard let thread = request["threadUrl"] as? String, PetEvent.isThreadURL(thread) else { throw PetError.invalid("thread URL") }
                 try queue.markRead(threadUrl: thread)

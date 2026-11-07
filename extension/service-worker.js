@@ -1,4 +1,4 @@
-importScripts("common.js", "worker-core.js");
+importScripts("common.js", "worker-core.js", "tab-retention.js", "config-sync.js");
 "use strict";
 const HOST = "com.instagrampet.bridge";
 let port = null, inflight = null;
@@ -40,6 +40,11 @@ const queue = new PetWorker.BridgeQueue({
   get: keys => chrome.storage.local.get(keys),
   set: values => chrome.storage.local.set(values), nativeRequest
 });
+const appConfig = new PetConfigSync.ConfigSync({
+  get: keys => chrome.storage.local.get(keys), set: values => chrome.storage.local.set(values),
+  nativeRequest, exclusive: operation => queue.exclusive(operation)
+});
+const tabRetention = new PetTabRetention.TabRetention(chrome);
 function fromContent(sender) {
   if (sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return false;
   try {
@@ -83,9 +88,11 @@ async function handle(message, sender) {
     throw new Error("Unsupported content request");
   }
   if (!fromUI(sender)) throw new Error("Untrusted sender");
+  if (message.type === "pet.config.sync") return appConfig.sync();
+  if (message.type === "pet.settings.save") return appConfig.saveManual(message.settings);
   if (message.type === "pet.status") {
-    const data = await chrome.storage.local.get(["pending", "diagnostics", "bridge", "lastDrop"]);
-    return { ok: true, pending: data.pending?.length || 0, diagnostics: data.diagnostics || {}, bridge: data.bridge || { state: "not-tested" }, lastDrop: data.lastDrop };
+    const data = await chrome.storage.local.get(["pending", "diagnostics", "bridge", "lastDrop", "appInstagram", "appConfigSync"]);
+    return { ok: true, pending: data.pending?.length || 0, diagnostics: data.diagnostics || {}, bridge: data.bridge || { state: "not-tested" }, lastDrop: data.lastDrop, appConfig: PetConfigSync.summary(data) };
   }
   if (message.type === "pet.ping") { const reply = await queue.ping(); queue.flush().catch(() => {}); return reply; }
   if (message.type === "pet.test") {
@@ -102,6 +109,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep the callback channel open, including Chrome before Promise responses.
 });
 function ensureAlarm() { chrome.alarms.create("pet-retry", { periodInMinutes: 1 }); }
+function refreshAppConfig() { return appConfig.sync().then(() => queue.flush()).catch(() => {}); }
 // A reload orphans content scripts in already-open tabs; re-inject so they keep observing without a tab refresh.
 async function reinject() {
   const { js, matches } = chrome.runtime.getManifest().content_scripts[0];
@@ -109,15 +117,17 @@ async function reinject() {
     chrome.scripting.executeScript({ target: { tabId: tab.id }, files: js }).catch(() => {});
 }
 chrome.runtime.onInstalled.addListener(({ reason }) => {
-  ensureAlarm(); queue.flush().catch(() => {});
+  ensureAlarm(); refreshAppConfig();
+  tabRetention.refresh().catch(() => {});
   if (reason === "install" || reason === "update") reinject().catch(() => {}); // chrome_update: declared scripts are still alive
 });
-chrome.runtime.onStartup.addListener(() => { ensureAlarm(); queue.flush().catch(() => {}); });
+chrome.runtime.onStartup.addListener(() => { ensureAlarm(); refreshAppConfig(); tabRetention.refresh().catch(() => {}); });
 // Clicking a pet bubble opens the thread in a new tab. If that thread is already open, switch to the
 // existing tab instead: a second copy of the same thread would show repeated messages twice.
 const freshTabs = new Map();
 chrome.tabs.onCreated.addListener(tab => { freshTabs.set(tab.id, Date.now()); });
-chrome.tabs.onRemoved.addListener(tabId => { freshTabs.delete(tabId); });
+chrome.tabs.onRemoved.addListener(tabId => { freshTabs.delete(tabId); tabRetention.removed(tabId).catch(() => {}); });
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => { tabRetention.changed(tabId, change, tab).catch(() => {}); });
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   const thread = change.url && PetCommon.threadURL(change.url);
   if (!thread || !(Date.now() - (freshTabs.get(tabId) || 0) < 10000)) return;
@@ -130,6 +140,15 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     await chrome.tabs.remove(tabId);
   }).catch(() => {});
 });
-chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "pet-retry") queue.flush().catch(() => {}); });
-chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes.settings) queue.flush().catch(() => {}); });
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "pet-retry") refreshAppConfig(); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.settings) {
+    queue.flush().catch(() => {});
+    tabRetention.refresh().catch(() => {});
+  }
+});
 ensureAlarm();
+tabRetention.refresh().catch(() => {});
+refreshAppConfig();
+// The existing native port keeps this worker alive; the alarm also recovers after suspension.
+setInterval(() => { appConfig.sync().catch(() => {}); }, 5000);

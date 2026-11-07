@@ -210,6 +210,21 @@ test('live layout: a reel that hydrates after first render still emits once', ()
   assert.equal(events.length, 1); assert.equal(events[0].text, '(릴스)');
   assert.deepEqual(t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 3000), []);
 });
+test('live layout: immediate scans wait for late sender actions without losing incoming text or announcing own replies', () => {
+  for (const user of ['fixture.sender', 'fixture.me']) {
+    const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'];
+    t.observe(snap(dom, liveCfg), allow, NOW);
+    appendLive(dom, { user, body: 'fixture text before sender metadata' });
+    const actions = [...dom.window.document.querySelectorAll('#messages > div:last-child [role="button"][aria-label]')];
+    const labels = actions.map(node => node.getAttribute('aria-label'));
+    actions.forEach(node => node.removeAttribute('aria-label'));
+    assert.deepEqual(t.observe(snap(dom, liveCfg), allow, NOW + 1000), [], 'unknown direction was announced');
+    actions.forEach((node, index) => node.setAttribute('aria-label', labels[index]));
+    const ready = t.observe(snap(dom, liveCfg), allow, NOW + 1001);
+    assert.equal(ready.length, user === 'fixture.sender' ? 1 : 0, 'late sender attribution changed delivery');
+    assert.deepEqual(t.observe(snap(dom, liveCfg), allow, NOW + 2000), [], 'hydrated row repeated');
+  }
+});
 test('live layout: the same reel or emoji sent again emits again; one tracker never repeats it', () => {
   const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'];
   const strip = () => dom.window.document.querySelector('#messages > div:last-child [role="article"] > div > span[dir="auto"]').remove();

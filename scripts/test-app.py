@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -13,7 +14,69 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 class AppPipelineTest(unittest.TestCase):
+    def test_settings_form_saves_recreates_only_changed_reader_and_preserves_other_sources(self):
+        with tempfile.TemporaryDirectory(prefix='Instagram Pet Settings ') as folder:
+            report = Path(folder) / 'settings-report.json'
+            app = subprocess.run([str(PROJECT / 'dist/InstagramPet.app/Contents/MacOS/InstagramPet'),
+                                  '--smoke-settings', str(report)],
+                                 env=dict(os.environ, INSTAGRAMPET_HOME=folder), capture_output=True, timeout=15)
+            self.assertEqual(app.returncode, 0, 'settings form smoke failed')
+            result = json.loads(report.read_text())
+            self.assertTrue(result['ok'], result)
+
+    def test_pet_stays_flush_and_strips_never_fold_during_deep_wall_pulls(self):
+        with tempfile.TemporaryDirectory(prefix='Instagram Pet Geometry ') as folder:
+            report = Path(folder) / 'geometry-report.json'
+            app = subprocess.run([str(PROJECT / 'dist/InstagramPet.app/Contents/MacOS/InstagramPet'),
+                                  '--smoke-pet-geometry', str(report)],
+                                 env=dict(os.environ, INSTAGRAMPET_HOME=folder), capture_output=True, timeout=15)
+            self.assertEqual(app.returncode, 0, 'pet geometry check failed')
+            result = json.loads(report.read_text())
+            self.assertTrue(result['ok'], result)
+            self.assertEqual(result['cases'], 540)
+
+    def test_unread_long_burst_updates_all_five_bubbles_without_reading_delay(self):
+        measured = subprocess.run([sys.executable, str(PROJECT / 'scripts/benchmark-delivery.py')],
+                                  capture_output=True, timeout=45)
+        self.assertEqual(measured.returncode, 0, 'synthetic burst measurement failed')
+        samples = json.loads(measured.stdout)
+        self.assertEqual([row[0] for row in samples], [1, 2, 3, 4, 4])  # one app keeps at most four
+        self.assertLess(max(row[1] for row in samples), 3000, samples)
+
+    def test_notification_wal_burst_reaches_five_bubbles_within_three_seconds(self):
+        measured = subprocess.run([
+            sys.executable, str(PROJECT / 'scripts/benchmark-delivery.py'),
+            '--source', 'notifications', '--messages', '5', '--length', '1000'
+        ], capture_output=True, timeout=45)
+        self.assertEqual(measured.returncode, 0, 'synthetic notification measurement failed')
+        samples = json.loads(measured.stdout)
+        self.assertEqual([row[0] for row in samples], [1, 2, 3, 4, 4])  # one app keeps at most four
+        self.assertTrue(all(row[1] >= 0 for row in samples), samples)
+        self.assertLess(max(row[1] for row in samples), 3000, samples)
+
+    def test_mixed_bubbles_clear_only_the_read_source_and_conversation(self):
+        with tempfile.TemporaryDirectory(prefix='Instagram Pet Sources ') as folder:
+            report = Path(folder) / 'source-report.json'
+            app = subprocess.run([str(PROJECT / 'dist/InstagramPet.app/Contents/MacOS/InstagramPet'),
+                                  '--smoke-source-reads', str(report)],
+                                 env=dict(os.environ, INSTAGRAMPET_HOME=folder), capture_output=True, timeout=15)
+            self.assertEqual(app.returncode, 0, app.stderr)
+            result = json.loads(report.read_text())
+            self.assertTrue(result['ok'], result)
+            self.assertEqual(result['visibleCounts'], [5, 4, 2, 0])
+            self.assertEqual(result['pendingCounts'], [3, 2, 1, 0])
+            self.assertTrue(result['capacityRecovery'])
+            self.assertTrue(result['orderPreserved'])
+            self.assertTrue(result['monotonicReads'])
+            self.assertNotIn(b'KakaoTalk', app.stdout + app.stderr)
+
     def test_native_queue_reaches_real_appkit_bubble_and_is_consumed(self):
+        self.run_pipeline([])
+
+    def test_new_message_ends_timed_hide(self):
+        self.run_pipeline(['--start-hidden'])
+
+    def run_pipeline(self, extra):
         with tempfile.TemporaryDirectory(prefix='Instagram Pet App 한글 ') as folder:
             root = Path(folder)
             (root / 'config.json').write_text(json.dumps({
@@ -32,7 +95,7 @@ class AppPipelineTest(unittest.TestCase):
             self.assertEqual(json.loads(native.stdout[4:])['type'], 'ack')
             report = root / 'app-report.json'
             app = subprocess.run([str(PROJECT / 'dist/InstagramPet.app/Contents/MacOS/InstagramPet'),
-                                  '--smoke-test', str(report)], env=env, capture_output=True, timeout=15)
+                                  '--smoke-test', str(report)] + extra, env=env, capture_output=True, timeout=15)
             self.assertEqual(app.returncode, 0, app.stderr)
             self.assertTrue(report.exists(), 'AppKit did not create the report; requires a logged-in Mac desktop session')
             result = json.loads(report.read_text())
