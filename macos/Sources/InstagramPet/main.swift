@@ -160,7 +160,10 @@ enum Orbit {
                 if top > area.maxY { top = arrow.minY }
                 top = min(max(top, area.minY + total), area.maxY)
                 for size in line {
-                    rects.append(NSRect(x: right ? x - size.width : x, y: top - size.height, width: size.width, height: size.height))
+                    // Slide in from the edge until resting against the column already there (no ragged gap).
+                    let beside = rects.filter { min($0.maxY, top) - max($0.minY, top - size.height) > 1 }
+                    let cx = right ? (beside.map(\.minX).min() ?? area.maxX) - size.width : beside.map(\.maxX).max() ?? area.minX
+                    rects.append(NSRect(x: cx, y: top - size.height, width: size.width, height: size.height))
                     top -= size.height
                 }
                 x += right ? -width : width
