@@ -76,6 +76,9 @@ class AppPipelineTest(unittest.TestCase):
     def test_new_message_ends_timed_hide(self):
         self.run_pipeline(['--start-hidden'])
 
+    def test_new_message_leaves_tucked_pet_tucked(self):
+        self.assertTrue(self.run_pipeline(['--start-tucked'])['petTucked'])
+
     def run_pipeline(self, extra):
         with tempfile.TemporaryDirectory(prefix='Instagram Pet App 한글 ') as folder:
             root = Path(folder)
@@ -105,6 +108,7 @@ class AppPipelineTest(unittest.TestCase):
             self.assertEqual(result['remainingQueueCount'], 0)
             self.assertEqual(list((root / 'inbox').glob('*.json')), [])
             self.assertNotIn(event['text'].encode(), app.stdout + app.stderr)
+            return result
 
 
 if __name__ == '__main__':

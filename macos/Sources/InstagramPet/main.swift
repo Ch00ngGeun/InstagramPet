@@ -1153,6 +1153,9 @@ final class PetController: NSObject, NSApplicationDelegate {
             if CommandLine.arguments.contains("--start-hidden") { // checks that a new message ends a timed hide
                 hidePetUntil = Date().addingTimeInterval(600); hideBubblesUntil = Date().addingTimeInterval(600)
             }
+            if CommandLine.arguments.contains("--start-tucked") { // a message must bring back bubbles, not the pet
+                tuckedUntil = Date().addingTimeInterval(600); hideBubblesUntil = Date().addingTimeInterval(600)
+            }
         }
         if let flag = CommandLine.arguments.firstIndex(of: "--smoke-burst-latency"), CommandLine.arguments.count > flag + 2 {
             smokeReport = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
@@ -1565,7 +1568,10 @@ final class PetController: NSObject, NSApplicationDelegate {
                     }
                     self.trimKnownIDs()
                     // A new message always shows: it ends any timed hide (bubbles or pet) right away.
-                    if !self.pending.isEmpty && (self.paused || self.isHidden) { self.showNow() }
+                    // A pet tucked behind its arrow stays tucked: only the bubbles come back.
+                    if !self.pending.isEmpty {
+                        if self.isHidden { self.showNow() } else if self.paused { self.resumeBubbles() }
+                    }
                     self.presentNextIfPossible()
                 case .failure:
                     self.lastError = "Queue read failed · check data folder"
@@ -1634,7 +1640,7 @@ final class PetController: NSObject, NSApplicationDelegate {
             try? queue.consume(event)
         }
         cat.excited = true
-        if smokeReport == nil { overlay.orderFrontRegardless(); panel.orderFrontRegardless() }
+        if smokeReport == nil { overlay.orderFrontRegardless(); if !isTucked && !isHidden { panel.orderFrontRegardless() } }
         updateStatus()
         if let expected = smokeBurstCount, let output = smokeReport {
             let delay = Date().timeIntervalSince(PetEvent.date(event.observedAt) ?? Date()) * 1000
@@ -2346,7 +2352,7 @@ final class PetController: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 let report: [String: Any] = [
                     "version": 1, "displayedEventId": self.current?.eventId as Any? ?? NSNull(),
-                    "remainingQueueCount": remaining, "bubbleVisible": !self.bubble.isHidden,
+                    "remainingQueueCount": remaining, "bubbleVisible": !self.bubble.isHidden, "petTucked": self.isTucked,
                     "ok": self.current != nil && !self.bubble.isHidden
                 ]
                 do {
