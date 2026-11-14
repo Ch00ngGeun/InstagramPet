@@ -14,18 +14,18 @@ public final class KakaoNotificationReader: LocalSourceReader {
             .appendingPathComponent("Library/Group Containers/group.com.apple.usernoted/db2/db")
     }
 
-    private struct FileIdentity: Equatable {
+    fileprivate struct FileIdentity: Equatable {
         let device: UInt64
         let inode: UInt64
         let birthSeconds: Int64
         let birthNanoseconds: Int64
     }
-    private struct Revision: Comparable {
+    fileprivate struct Revision: Comparable, Hashable {
         let date: Double
         let row: Int64
         static func < (a: Revision, b: Revision) -> Bool { a.date == b.date ? a.row < b.row : a.date < b.date }
     }
-    private struct Row {
+    fileprivate struct Row {
         let id: Int64
         let uuid: Data
         let payload: Data
@@ -36,14 +36,14 @@ public final class KakaoNotificationReader: LocalSourceReader {
     private struct Waiting { let event: PetEvent; let at: Date }
     /// Only canonical-message digests are retained; delivery/presentation metadata is not a new message.
     private struct MessageState { let digest: String; let at: Date }
-    private enum Failure: Error { case permission, unavailable, busy }
-    private static let bundle = "com.kakao.kakaotalkmac"
+    fileprivate enum Failure: Error { case permission, unavailable, busy }
+    fileprivate static let bundle = "com.kakao.kakaotalkmac"
     private static let capacity = 200
-    private static let pageSize = 200
+    fileprivate static let pageSize = 200
     private static let lifetime: TimeInterval = 12 * 60 * 60
     private let name: String?
     private let conversation: ConversationKey?
-    private let databaseURL: URL
+    private let database: KakaoNotificationDatabase
     private var file: FileIdentity?
     private var cursor: Int64?
     private var revision: Revision?
@@ -52,13 +52,18 @@ public final class KakaoNotificationReader: LocalSourceReader {
     private var seen: [String: Date] = [:]
     private var lastMessages: [String: MessageState] = [:]
 
-    public init(name: String?, databaseURL: URL = KakaoNotificationReader.defaultDatabaseURL) {
+    public convenience init(name: String?, databaseURL: URL = KakaoNotificationReader.defaultDatabaseURL,
+                            databaseSessionOpened: (() -> Void)? = nil) {
+        self.init(name: name, database: KakaoNotificationDatabase(url: databaseURL, opened: databaseSessionOpened))
+    }
+
+    init(name: String?, database: KakaoNotificationDatabase) {
         let clean = name?.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
         self.name = clean.flatMap {
             !$0.isEmpty && $0.count <= 100 && !$0.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) ? $0 : nil
         }
         conversation = self.name.map { ConversationKey.local(.kakao, identifier: $0) }
-        self.databaseURL = databaseURL
+        self.database = database
     }
 
     public func acknowledge(_ identities: Set<String>) {
@@ -80,50 +85,42 @@ public final class KakaoNotificationReader: LocalSourceReader {
             for (record, _) in oldest { lastMessages.removeValue(forKey: record) }
         }
         do {
-            let currentFile = try fileIdentity()
-            if file != currentFile { reset(); file = currentFile }
-            var database: OpaquePointer?
-            var uri = URLComponents()
-            uri.scheme = "file"; uri.path = databaseURL.path
-            uri.queryItems = [URLQueryItem(name: "mode", value: "ro"), URLQueryItem(name: "cache", value: "private")]
-            guard let path = uri.string else { throw Failure.unavailable }
-            let code = sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, nil)
-            defer { if let database { sqlite3_close(database) } }
-            try verify(code)
-            guard let database, sqlite3_db_readonly(database, "main") == 1 else { throw Failure.unavailable }
-            sqlite3_busy_timeout(database, 75)
-            let maximum = try highWater(database)
-            guard let cursor, maximum.0 >= cursor, revision != nil, baselineAt != nil else {
-                self.cursor = maximum.0; revision = maximum.1; baselineAt = now
+            return try database.read { snapshot in
+                let currentFile = snapshot.file
+                if file != currentFile { reset(); file = currentFile }
+                let maximum = try snapshot.highWater()
+                guard let cursor, maximum.0 >= cursor, revision != nil, baselineAt != nil else {
+                    self.cursor = maximum.0; revision = maximum.1; baselineAt = now
+                    return batch(.observing)
+                }
+
+                // A bounded retry outbox stops cursor advancement rather than dropping a burst.
+                let room = Self.capacity - outbox.count
+                if room > 0 {
+                    let fresh = try snapshot.rows(selection: "r.rec_id > ? AND r.rec_id <= ?", integers: [cursor, maximum.0], revision: nil, limit: min(room, Self.pageSize))
+                    var next = cursor
+                    for row in fresh {
+                        guard try receive(row, name: name, conversation: conversation, now: now) else { break }
+                        next = row.id
+                    }
+                    if fresh.count < min(room, Self.pageSize) { next = maximum.0 }
+                    self.cursor = next
+                }
+                if outbox.count < Self.capacity, let before = revision {
+                    let updates = try snapshot.rows(
+                        selection: "(r.request_last_date > ? OR (r.request_last_date = ? AND r.rec_id > ?)) AND (r.request_last_date < ? OR (r.request_last_date = ? AND r.rec_id <= ?))",
+                        integers: [], revision: (before, maximum.1), limit: Self.pageSize)
+                    var next = before
+                    for row in updates {
+                        guard try receive(row, name: name, conversation: conversation, now: now) else { break }
+                        next = Revision(date: row.revised, row: row.id)
+                    }
+                    // Do not skip the unprocessed remainder when the outbox becomes full.
+                    if updates.count < Self.pageSize && outbox.count < Self.capacity { next = maximum.1 }
+                    revision = next
+                }
                 return batch(.observing)
             }
-
-            // A bounded retry outbox stops cursor advancement rather than dropping a burst.
-            let room = Self.capacity - outbox.count
-            if room > 0 {
-                let fresh = try rows(database, selection: "r.rec_id > ? AND r.rec_id <= ?", integers: [cursor, maximum.0], revision: nil, limit: min(room, Self.pageSize))
-                var next = cursor
-                for row in fresh {
-                    guard try receive(row, name: name, conversation: conversation, now: now) else { break }
-                    next = row.id
-                }
-                if fresh.count < min(room, Self.pageSize) { next = maximum.0 }
-                self.cursor = next
-            }
-            if outbox.count < Self.capacity, let before = revision {
-                let updates = try rows(database,
-                    selection: "(r.request_last_date > ? OR (r.request_last_date = ? AND r.rec_id > ?)) AND (r.request_last_date < ? OR (r.request_last_date = ? AND r.rec_id <= ?))",
-                    integers: [], revision: (before, maximum.1), limit: Self.pageSize)
-                var next = before
-                for row in updates {
-                    guard try receive(row, name: name, conversation: conversation, now: now) else { break }
-                    next = Revision(date: row.revised, row: row.id)
-                }
-                // Do not skip the unprocessed remainder when the outbox becomes full.
-                if updates.count < Self.pageSize && outbox.count < Self.capacity { next = maximum.1 }
-                revision = next
-            }
-            return batch(.observing)
         } catch Failure.permission {
             reset()
             return batch(.permissionRequired)
@@ -139,90 +136,6 @@ public final class KakaoNotificationReader: LocalSourceReader {
             $0.at == $1.at ? $0.event.identity < $1.event.identity : $0.at < $1.at
         }.map(\.event)
         return SourcePoll(events: events, status: status)
-    }
-
-    private func fileIdentity() throws -> FileIdentity {
-        var info = stat()
-        guard lstat(databaseURL.path, &info) == 0 else {
-            throw errno == EACCES || errno == EPERM ? Failure.permission : Failure.unavailable
-        }
-        guard info.st_mode & S_IFMT == S_IFREG else { throw Failure.unavailable }
-        return FileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino),
-            birthSeconds: Int64(info.st_birthtimespec.tv_sec), birthNanoseconds: Int64(info.st_birthtimespec.tv_nsec))
-    }
-
-    private func verify(_ code: Int32) throws {
-        switch code & 0xff {
-        case SQLITE_OK, SQLITE_ROW, SQLITE_DONE: return
-        case SQLITE_PERM, SQLITE_AUTH, SQLITE_CANTOPEN, SQLITE_READONLY: throw Failure.permission
-        case SQLITE_BUSY, SQLITE_LOCKED: throw Failure.busy
-        default: throw Failure.unavailable
-        }
-    }
-
-    private func statement(_ database: OpaquePointer, _ sql: String) throws -> OpaquePointer {
-        var result: OpaquePointer?
-        let code = sqlite3_prepare_v2(database, sql, -1, &result, nil)
-        if code != SQLITE_OK { if let result { sqlite3_finalize(result) }; try verify(code) }
-        guard let result else { throw Failure.unavailable }
-        return result
-    }
-
-    private func highWater(_ database: OpaquePointer) throws -> (Int64, Revision) {
-        let maxID = try statement(database, """
-            SELECT COALESCE(MAX(r.rec_id),0), COALESCE(MAX(r.request_last_date),0)
-            FROM record r JOIN app a ON a.app_id=r.app_id WHERE lower(a.identifier)=?
-            """)
-        defer { sqlite3_finalize(maxID) }
-        try verify(sqlite3_bind_text(maxID, 1, Self.bundle, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)))
-        try verify(sqlite3_step(maxID))
-        let id = sqlite3_column_int64(maxID, 0), date = sqlite3_column_double(maxID, 1)
-        guard date.isFinite, date >= 0 else { throw Failure.unavailable }
-        let maxRevision = try statement(database, """
-            SELECT COALESCE(MAX(r.rec_id),0) FROM record r JOIN app a ON a.app_id=r.app_id
-            WHERE lower(a.identifier)=? AND r.request_last_date=?
-            """)
-        defer { sqlite3_finalize(maxRevision) }
-        try verify(sqlite3_bind_text(maxRevision, 1, Self.bundle, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)))
-        try verify(sqlite3_bind_double(maxRevision, 2, date))
-        try verify(sqlite3_step(maxRevision))
-        return (id, Revision(date: date, row: sqlite3_column_int64(maxRevision, 0)))
-    }
-
-    private func rows(_ database: OpaquePointer, selection: String, integers: [Int64], revision: (Revision, Revision)?, limit: Int) throws -> [Row] {
-        let order = revision == nil ? "r.rec_id" : "r.request_last_date,r.rec_id"
-        let query = try statement(database, """
-            SELECT r.rec_id,r.uuid,
-                   CASE WHEN length(r.data)<=65536 THEN r.data ELSE NULL END,
-                   r.request_date,r.request_last_date,r.delivered_date
-            FROM record r JOIN app a ON a.app_id=r.app_id
-            WHERE lower(a.identifier)=? AND \(selection)
-            ORDER BY \(order) LIMIT \(limit)
-            """)
-        defer { sqlite3_finalize(query) }
-        try verify(sqlite3_bind_text(query, 1, Self.bundle, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)))
-        if let (lower, upper) = revision {
-            for (index, value) in [lower.date, lower.date, upper.date, upper.date].enumerated() {
-                let parameter: Int32 = [2, 3, 5, 6][index]
-                try verify(sqlite3_bind_double(query, parameter, value))
-            }
-            try verify(sqlite3_bind_int64(query, 4, lower.row)); try verify(sqlite3_bind_int64(query, 7, upper.row))
-        } else {
-            for (index, value) in integers.enumerated() { try verify(sqlite3_bind_int64(query, Int32(index + 2), value)) }
-        }
-        var result: [Row] = []
-        while true {
-            let code = sqlite3_step(query); try verify(code)
-            if code == SQLITE_DONE { break }
-            func bytes(_ column: Int32) -> Data {
-                let count = Int(sqlite3_column_bytes(query, column))
-                guard count > 0, count <= 65536, let pointer = sqlite3_column_blob(query, column) else { return Data() }
-                return Data(bytes: pointer, count: count)
-            }
-            result.append(Row(id: sqlite3_column_int64(query, 0), uuid: bytes(1), payload: bytes(2),
-                requested: sqlite3_column_double(query, 3), revised: sqlite3_column_double(query, 4), delivered: sqlite3_column_double(query, 5)))
-        }
-        return result
     }
 
     /// Returns false only for backpressure. Malformed and unrelated notifications advance the cursor.
@@ -274,6 +187,166 @@ public final class KakaoNotificationReader: LocalSourceReader {
         outbox[event.identity] = Waiting(event: event, at: delivered)
         lastMessages[record] = MessageState(digest: state, at: now)
         return true
+    }
+}
+
+/// One short-lived read-only session per contact-group poll. Reader cursors/outboxes remain independent.
+final class KakaoNotificationDatabase {
+    fileprivate typealias FileIdentity = KakaoNotificationReader.FileIdentity
+    fileprivate typealias Revision = KakaoNotificationReader.Revision
+    fileprivate typealias Row = KakaoNotificationReader.Row
+    fileprivate typealias Failure = KakaoNotificationReader.Failure
+    private let databaseURL: URL
+    private let opened: (() -> Void)?
+    private var inPoll = false
+    private var snapshot: Result<Session, Error>?
+
+    init(url: URL, opened: (() -> Void)? = nil) { databaseURL = url; self.opened = opened }
+    func beginPoll() { snapshot = nil; inPoll = true }
+    func endPoll() { snapshot = nil; inPoll = false }
+
+    fileprivate func read<T>(_ body: (Session) throws -> T) throws -> T {
+        let result: Result<Session, Error>
+        if inPoll, let snapshot { result = snapshot }
+        else {
+            result = Result { try Session(url: databaseURL, file: fileIdentity(), opened: opened) }
+            if inPoll { snapshot = result }
+        }
+        return try body(result.get())
+    }
+
+    private func fileIdentity() throws -> FileIdentity {
+        var info = stat()
+        guard lstat(databaseURL.path, &info) == 0 else {
+            throw errno == EACCES || errno == EPERM ? Failure.permission : Failure.unavailable
+        }
+        guard info.st_mode & S_IFMT == S_IFREG else { throw Failure.unavailable }
+        return FileIdentity(device: UInt64(info.st_dev), inode: UInt64(info.st_ino),
+            birthSeconds: Int64(info.st_birthtimespec.tv_sec), birthNanoseconds: Int64(info.st_birthtimespec.tv_nsec))
+    }
+
+    fileprivate static func verify(_ code: Int32) throws {
+        switch code & 0xff {
+        case SQLITE_OK, SQLITE_ROW, SQLITE_DONE: return
+        case SQLITE_PERM, SQLITE_AUTH, SQLITE_CANTOPEN, SQLITE_READONLY: throw Failure.permission
+        case SQLITE_BUSY, SQLITE_LOCKED: throw Failure.busy
+        default: throw Failure.unavailable
+        }
+    }
+
+    fileprivate final class Session {
+        private struct Query: Hashable {
+            let selection: String
+            let integers: [Int64]
+            let lower: Revision?
+            let upper: Revision?
+        }
+        let file: FileIdentity
+        private let database: OpaquePointer
+        private var maximum: Result<(Int64, Revision), Error>?
+        private var rowCache: [Query: Result<[Row], Error>] = [:]
+        private static let bundle = KakaoNotificationReader.bundle
+        private static let pageSize = KakaoNotificationReader.pageSize
+
+        init(url: URL, file: FileIdentity, opened: (() -> Void)?) throws {
+            self.file = file
+            var handle: OpaquePointer?
+            var uri = URLComponents()
+            uri.scheme = "file"; uri.path = url.path
+            uri.queryItems = [URLQueryItem(name: "mode", value: "ro"), URLQueryItem(name: "cache", value: "private")]
+            guard let path = uri.string else { throw Failure.unavailable }
+            let code = sqlite3_open_v2(path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, nil)
+            var retained = false
+            defer { if !retained, let handle { sqlite3_close(handle) } }
+            try KakaoNotificationDatabase.verify(code)
+            guard let handle, sqlite3_db_readonly(handle, "main") == 1 else { throw Failure.unavailable }
+            database = handle
+            sqlite3_busy_timeout(handle, 75)
+            retained = true
+            opened?()
+        }
+        deinit { sqlite3_close(database) }
+
+        func highWater() throws -> (Int64, Revision) {
+            let result = maximum ?? Result { try readHighWater() }
+            maximum = result
+            return try result.get()
+        }
+
+        func rows(selection: String, integers: [Int64], revision: (Revision, Revision)?, limit: Int) throws -> [Row] {
+            let query = Query(selection: selection, integers: integers, lower: revision?.0, upper: revision?.1)
+            // Read one full page so contacts with different free outbox space still reuse the same rows.
+            let result = rowCache[query] ?? Result { try readRows(selection: selection, integers: integers, revision: revision, limit: Self.pageSize) }
+            // Different contact backlogs may request different ranges; keep retained raw data bounded.
+            if rowCache.count < 4 { rowCache[query] = result }
+            return Array(try result.get().prefix(limit))
+        }
+
+        private func statement(_ database: OpaquePointer, _ sql: String) throws -> OpaquePointer {
+            var result: OpaquePointer?
+            let code = sqlite3_prepare_v2(database, sql, -1, &result, nil)
+            if code != SQLITE_OK { if let result { sqlite3_finalize(result) }; try KakaoNotificationDatabase.verify(code) }
+            guard let result else { throw Failure.unavailable }
+            return result
+        }
+
+        private func readHighWater() throws -> (Int64, Revision) {
+            let maxID = try statement(database, """
+                SELECT COALESCE(MAX(r.rec_id),0), COALESCE(MAX(r.request_last_date),0)
+                FROM record r JOIN app a ON a.app_id=r.app_id WHERE lower(a.identifier)=?
+                """)
+            defer { sqlite3_finalize(maxID) }
+            try KakaoNotificationDatabase.verify(sqlite3_bind_text(maxID, 1, Self.bundle, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)))
+            try KakaoNotificationDatabase.verify(sqlite3_step(maxID))
+            let id = sqlite3_column_int64(maxID, 0), date = sqlite3_column_double(maxID, 1)
+            guard date.isFinite, date >= 0 else { throw Failure.unavailable }
+            let maxRevision = try statement(database, """
+                SELECT COALESCE(MAX(r.rec_id),0) FROM record r JOIN app a ON a.app_id=r.app_id
+                WHERE lower(a.identifier)=? AND r.request_last_date=?
+                """)
+            defer { sqlite3_finalize(maxRevision) }
+            try KakaoNotificationDatabase.verify(sqlite3_bind_text(maxRevision, 1, Self.bundle, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)))
+            try KakaoNotificationDatabase.verify(sqlite3_bind_double(maxRevision, 2, date))
+            try KakaoNotificationDatabase.verify(sqlite3_step(maxRevision))
+            return (id, Revision(date: date, row: sqlite3_column_int64(maxRevision, 0)))
+        }
+
+        private func readRows(selection: String, integers: [Int64], revision: (Revision, Revision)?, limit: Int) throws -> [Row] {
+            let order = revision == nil ? "r.rec_id" : "r.request_last_date,r.rec_id"
+            let query = try statement(database, """
+                SELECT r.rec_id,r.uuid,
+                       CASE WHEN length(r.data)<=65536 THEN r.data ELSE NULL END,
+                       r.request_date,r.request_last_date,r.delivered_date
+                FROM record r JOIN app a ON a.app_id=r.app_id
+                WHERE lower(a.identifier)=? AND \(selection)
+                ORDER BY \(order) LIMIT \(limit)
+                """)
+            defer { sqlite3_finalize(query) }
+            try KakaoNotificationDatabase.verify(sqlite3_bind_text(query, 1, Self.bundle, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)))
+            if let (lower, upper) = revision {
+                for (index, value) in [lower.date, lower.date, upper.date, upper.date].enumerated() {
+                    let parameter: Int32 = [2, 3, 5, 6][index]
+                    try KakaoNotificationDatabase.verify(sqlite3_bind_double(query, parameter, value))
+                }
+                try KakaoNotificationDatabase.verify(sqlite3_bind_int64(query, 4, lower.row)); try KakaoNotificationDatabase.verify(sqlite3_bind_int64(query, 7, upper.row))
+            } else {
+                for (index, value) in integers.enumerated() { try KakaoNotificationDatabase.verify(sqlite3_bind_int64(query, Int32(index + 2), value)) }
+            }
+            var result: [Row] = []
+            while true {
+                let code = sqlite3_step(query); try KakaoNotificationDatabase.verify(code)
+                if code == SQLITE_DONE { break }
+                func bytes(_ column: Int32) -> Data {
+                    let count = Int(sqlite3_column_bytes(query, column))
+                    guard count > 0, count <= 65536, let pointer = sqlite3_column_blob(query, column) else { return Data() }
+                    return Data(bytes: pointer, count: count)
+                }
+                result.append(Row(id: sqlite3_column_int64(query, 0), uuid: bytes(1), payload: bytes(2),
+                    requested: sqlite3_column_double(query, 3), revised: sqlite3_column_double(query, 4), delivered: sqlite3_column_double(query, 5)))
+            }
+            return result
+        }
+
     }
 }
 

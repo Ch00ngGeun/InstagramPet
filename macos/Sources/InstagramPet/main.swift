@@ -311,7 +311,7 @@ enum Orbit {
 /// A side of the world a blob may not cross: points with dot(p - point, normal) > 0 are pushed back onto the line.
 /// With a `zone` (a neighbour's ellipse bounds) only points inside that neighbour are pushed back, so
 /// the flat face covers just the real contact, not a long cut across the blob.
-struct Wall {
+struct Wall: Equatable {
     var point: NSPoint
     var normal: NSPoint
     var zone: NSRect? = nil
@@ -437,12 +437,18 @@ final class BubbleView: NSView {
     private(set) var event: PetEvent?
     private var wobble: [CGFloat] = Array(repeating: 0, count: 32)
     private var velocity = NSPoint.zero
+    // Count invalidation requests, including offscreen views whose AppKit dirty flag is cleared immediately.
+    private(set) var redrawRequests = 0
+    override var needsDisplay: Bool {
+        get { super.needsDisplay }
+        set { if newValue { redrawRequests += 1 }; super.needsDisplay = newValue }
+    }
     var onClick: ((PetEvent) -> Void)?
     /// Solver output: the footprint rect (body + tailRoom) in superview coordinates, and the shape.
     var goal = NSRect.zero
     var shape = 0 { didSet { messageField.maximumNumberOfLines = Self.shapes[shape].lines; needsLayout = true } }
     /// Screen edges and neighbours, in superview coordinates.
-    var walls: [Wall] = []
+    var walls: [Wall] = [] { didSet { if walls != oldValue { needsDisplay = true } } }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -484,7 +490,7 @@ final class BubbleView: NSView {
 
     private var bodyRect: NSRect { bounds.insetBy(dx: Self.margin, dy: Self.margin) }
 
-    private var blob: NSBezierPath {
+    fileprivate var blob: NSBezierPath {
         Slime.path(in: bodyRect, wobble: wobble, bulge: Self.bulge, velocity: velocity,
                    walls: walls.map { $0.local(to: self) })
     }
@@ -569,7 +575,8 @@ final class BubbleView: NSView {
 
     /// A collision push: moves now and feeds the jelly, so a shoved blob squashes and wobbles.
     func shove(_ push: NSPoint) {
-        guard push.x != 0 || push.y != 0 else { return }
+        // Subpixel round-off at flush contacts must not keep a resting spring and redraws alive.
+        guard max(abs(push.x), abs(push.y)) > 0.0001 else { return }
         frame = frame.offsetBy(dx: push.x, dy: push.y)
         velocity = NSPoint(x: velocity.x + push.x * 0.5, y: velocity.y + push.y * 0.5)
         needsDisplay = true
@@ -578,16 +585,18 @@ final class BubbleView: NSView {
     /// A damped spring toward the solver's goal: it lags (satellite), overshoots a little and settles (jelly).
     func step(animated: Bool) {
         let target = goal.insetBy(dx: Self.tailRoom - Self.margin, dy: Self.tailRoom - Self.margin)
+        let previousFrame = frame, previousVelocity = velocity, previousAlpha = alphaValue
         if !animated || frame == .zero {
-            frame = target; velocity = .zero; alphaValue = 1; needsDisplay = true; return
+            if frame != target { frame = target }
+            velocity = .zero
+            if alphaValue != 1 { alphaValue = 1 }
+        } else {
+            let next = Slime.spring(frame, &velocity, toward: target)
+            if next != frame { frame = next }
+            if alphaValue < 1 { alphaValue = min(1, alphaValue + 0.15) }
         }
-        let next = Slime.spring(frame, &velocity, toward: target)
-        if next != frame {
-            if next.size != frame.size { needsLayout = true }
-            frame = next
-        }
-        needsDisplay = true
-        if alphaValue < 1 { alphaValue = min(1, alphaValue + 0.15) }
+        if frame.size != previousFrame.size { needsLayout = true }
+        if frame != previousFrame || velocity != previousVelocity || alphaValue != previousAlpha { needsDisplay = true }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -625,7 +634,9 @@ final class BubbleField: NSView {
     }
 
     /// Re-solve only when the pet, the screen or the messages change; spring every tick.
-    func update(pet: NSRect, area: NSRect, animated: Bool) {
+    /// `petIsSolid` false: the pet is tucked or hidden, so its old spot must not shove or flatten bubbles
+    /// (they kept fighting their goal there and stayed stretched into broken slivers at corners).
+    func update(pet: NSRect, area: NSRect, animated: Bool, petIsSolid: Bool = true) {
         let key = "\(pet.integral)|\(area)|\(order.map(\.identity))|\(String(describing: Orbit.tuckAnchor))"
         if key != solvedKey {
             solvedKey = key
@@ -642,13 +653,14 @@ final class BubbleField: NSView {
         // Walls: the screen edges, and between neighbours a line where their bodies would meet.
         let edges = [Wall(point: NSPoint(x: area.minX, y: 0), normal: NSPoint(x: -1, y: 0)), Wall(point: NSPoint(x: area.maxX, y: 0), normal: NSPoint(x: 1, y: 0)),
                      Wall(point: NSPoint(x: 0, y: area.minY), normal: NSPoint(x: 0, y: -1)), Wall(point: NSPoint(x: 0, y: area.maxY), normal: NSPoint(x: 0, y: 1))]
-        let all = Array(views.values)
+        // Resolve collisions in arrival order: dictionary order can trap a reflowing row behind its neighbours.
+        let all = order.compactMap { views[$0.identity] }
         for view in all { view.step(animated: animated) }
         // Solid bodies: a fast pet shoves bubbles along instead of passing through, and bubbles shove each other.
         if animated {
             let solid = pet.insetBy(dx: 10, dy: 6)
             for _ in 0..<3 {
-                for view in all { if let push = Self.separation(view.footprintNow, from: solid) { view.shove(push) } }
+                if petIsSolid { for view in all { if let push = Self.separation(view.footprintNow, from: solid) { view.shove(push) } } }
                 for (i, a) in all.enumerated() {
                     for b in all[(i + 1)...] {
                         guard let push = Self.separation(a.footprintNow, from: b.footprintNow) else { continue }
@@ -692,7 +704,7 @@ final class BubbleField: NSView {
             let solid = pet.insetBy(dx: 10, dy: 6)
             let gapX = max(solid.minX - mine.maxX, mine.minX - solid.maxX), gapY = max(solid.minY - mine.maxY, mine.minY - solid.maxY)
             let zone = solid.insetBy(dx: -solid.width * 0.25, dy: -solid.height * 0.25)
-            if max(gapX, gapY) < 80 {
+            if petIsSolid && max(gapX, gapY) < 80 {
                 if gapX >= gapY {
                     walls.append(c.x > solid.midX ? Wall(point: NSPoint(x: solid.maxX, y: 0), normal: NSPoint(x: -1, y: 0), zone: zone)
                                                   : Wall(point: NSPoint(x: solid.minX, y: 0), normal: NSPoint(x: 1, y: 0), zone: zone))
@@ -726,12 +738,17 @@ final class HideArrow: NSView {
     static let margin: CGFloat = 12
     private let wobble = Slime.wobble("hide-arrow", count: 12, amount: 0.1)
     private var velocity = NSPoint.zero
-    var tucked = false
-    var count = 0
-    var pulse: CGFloat = 0
-    var toward = NSPoint.zero
+    private(set) var redrawRequests = 0
+    override var needsDisplay: Bool {
+        get { super.needsDisplay }
+        set { if newValue { redrawRequests += 1 }; super.needsDisplay = newValue }
+    }
+    var tucked = false { didSet { if tucked != oldValue { needsDisplay = true } } }
+    var count = 0 { didSet { if count != oldValue { needsDisplay = true } } }
+    var pulse: CGFloat = 0 { didSet { if pulse != oldValue && tucked && count > 0 { needsDisplay = true } } }
+    var toward = NSPoint.zero { didSet { if toward != oldValue { needsDisplay = true } } }
     var goal = NSRect.zero
-    var walls: [Wall] = []
+    var walls: [Wall] = [] { didSet { if walls != oldValue { needsDisplay = true } } }
     var onClick: ((HideArrow) -> Void)?
     /// Dragging the arrow carries the hidden pet with it; `delta` is the pointer's travel since mouse-down.
     var onDrag: ((NSPoint) -> Void)?
@@ -775,12 +792,18 @@ final class HideArrow: NSView {
         }
     }
 
+    private var lastStepFrame = NSRect.zero
     func step(animated: Bool) {
         let target = goal.insetBy(dx: -Self.margin, dy: -Self.margin)
-        if isDragging { needsDisplay = true; return }
-        if !animated || frame == .zero { frame = target; velocity = .zero }
-        else { frame = Slime.spring(frame, &velocity, toward: target) }
-        needsDisplay = true
+        let previousVelocity = velocity
+        if !isDragging {
+            let next: NSRect
+            if !animated || frame == .zero { next = target; velocity = .zero }
+            else { next = Slime.spring(frame, &velocity, toward: target) }
+            if frame != next { frame = next }
+        }
+        if frame != lastStepFrame || velocity != previousVelocity { needsDisplay = true }
+        lastStepFrame = frame
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -828,10 +851,11 @@ final class CatView: NSView {
     var area: NSRect?
     /// Called while dragging with the window origin the pointer asks for; the owner clamps it and sets the press.
     var onDragTo: ((NSPoint) -> Void)?
-    // Bundled cutout character; missing only when run outside the .app bundle.
-    private let sprite = Bundle.main.image(forResource: "pet")
-    /// Bottom-to-top alpha spans, cached once; transparent pixels do not count as wall contact.
-    private lazy var opaqueRows: [(CGFloat, CGFloat)] = {
+    // Bundled cutout character, or one the user added; missing only when run outside the .app bundle.
+    var sprite = Bundle.main.image(forResource: "pet") { didSet { opaqueRows = Self.rows(of: sprite); needsDisplay = true } }
+    /// Bottom-to-top alpha spans, cached per sprite; transparent pixels do not count as wall contact.
+    private lazy var opaqueRows = Self.rows(of: sprite)
+    private static func rows(of sprite: NSImage?) -> [(CGFloat, CGFloat)] {
         guard let image = sprite?.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return [] }
         let bitmap = NSBitmapImageRep(cgImage: image), width = bitmap.pixelsWide, height = bitmap.pixelsHigh
         return (0..<height).map { row in
@@ -841,7 +865,7 @@ final class CatView: NSView {
             }
             return left < right ? (CGFloat(left) / CGFloat(width), CGFloat(right) / CGFloat(width)) : (0, 1)
         }
-    }()
+    }
     private let pink = NSColor(calibratedRed: 0.91, green: 0.55, blue: 0.52, alpha: 1)
 
     override init(frame frameRect: NSRect) {
@@ -1124,6 +1148,18 @@ final class PetController: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-bubble-geometry"), CommandLine.arguments.count > flag + 1 {
+            previewMode = true
+            checkBubbleGeometry(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-idle-render"), CommandLine.arguments.count > flag + 1 {
+            previewMode = true
+            checkBubbleGeometry(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]), requireIdle: true)
+            NSApplication.shared.terminate(nil)
+            return
+        }
         if CommandLine.arguments.contains("--measure-live-ax") {
             previewMode = true
             measureLiveAccessibility()
@@ -1133,6 +1169,12 @@ final class PetController: NSObject, NSApplicationDelegate {
         if let flag = CommandLine.arguments.firstIndex(of: "--smoke-source-reads"), CommandLine.arguments.count > flag + 1 {
             previewMode = true
             checkSourceReads(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        if let flag = CommandLine.arguments.firstIndex(of: "--smoke-source-failures"), CommandLine.arguments.count > flag + 1 {
+            previewMode = true
+            checkSourceFailures(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
             NSApplication.shared.terminate(nil)
             return
         }
@@ -1181,6 +1223,14 @@ final class PetController: NSObject, NSApplicationDelegate {
         }
         buildPanel()
         buildMenu()
+        // No menu bar of its own, so text fields need this hidden Edit menu for ⌘C/⌘V/⌘X/⌘A/⌘Z.
+        let edit = NSMenu(title: "Edit")
+        for (title, action, key) in [("Undo", Selector(("undo:")), "z"), ("Redo", Selector(("redo:")), "Z"), ("Cut", #selector(NSText.cut(_:)), "x"),
+                                     ("Copy", #selector(NSText.copy(_:)), "c"), ("Paste", #selector(NSText.paste(_:)), "v"), ("Select All", #selector(NSText.selectAll(_:)), "a")] {
+            edit.addItem(withTitle: title, action: action, keyEquivalent: key)
+        }
+        let main = NSMenu(), editItem = NSMenuItem()
+        editItem.submenu = edit; main.addItem(NSMenuItem()); main.addItem(editItem); NSApp.mainMenu = main // first item is the app menu
         if smokeReport == nil { overlay.orderFrontRegardless(); panel.orderFrontRegardless() }
         else { statusItem.isVisible = false }
         animationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20, repeats: true) { [weak self] _ in
@@ -1316,6 +1366,7 @@ final class PetController: NSObject, NSApplicationDelegate {
         menu.addItem(item("Clear Waiting Messages", action: #selector(clearMessages)))
         menu.addItem(.separator())
         menu.addItem(item("설정…", action: #selector(openSettings), key: ","))
+        let character = item("캐릭터"); character.submenu = characterMenu; menu.addItem(character)
         menu.addItem(item("Open Instagram Inbox", action: #selector(openInbox)))
         menu.addItem(item("Open Local Data Folder", action: #selector(openDataFolder)))
         menu.addItem(.separator())
@@ -1323,7 +1374,99 @@ final class PetController: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         statusItem.menu = menu
         cat.petMenu = menu
+        characterMenu.autoenablesItems = false
+        applyCharacter()
         updateStatus()
+    }
+
+    // Characters: PNGs the user added, kept in the local data folder; the chosen file name lives in defaults.
+    private let characterMenu = NSMenu()
+    private var charactersFolder: URL { paths.root.appendingPathComponent("characters", isDirectory: true) }
+    private var chosenCharacter: String? {
+        get { UserDefaults.standard.string(forKey: "pet.character") }
+        set { UserDefaults.standard.set(newValue, forKey: "pet.character") }
+    }
+
+    private func applyCharacter() {
+        // A missing or unreadable file falls back to the bundled pet.
+        let custom = chosenCharacter.flatMap { NSImage(contentsOf: charactersFolder.appendingPathComponent($0)) }
+        if custom == nil { chosenCharacter = nil }
+        cat.sprite = custom ?? Bundle.main.image(forResource: "pet")
+        characterMenu.removeAllItems()
+        let files = ((try? FileManager.default.contentsOfDirectory(at: charactersFolder, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "png" }.map(\.lastPathComponent).sorted()
+        for name in [nil] + files.map(Optional.some) {
+            let choice = item(name.map { ($0 as NSString).deletingPathExtension } ?? "기본 펫", action: #selector(chooseCharacter(_:)))
+            choice.representedObject = name
+            choice.state = name == chosenCharacter ? .on : .off
+            characterMenu.addItem(choice)
+        }
+        characterMenu.addItem(.separator())
+        characterMenu.addItem(item("캐릭터 추가…", action: #selector(addCharacter)))
+        let remove = item("현재 캐릭터 삭제…", action: #selector(deleteCharacter))
+        remove.isEnabled = chosenCharacter != nil
+        characterMenu.addItem(remove)
+    }
+
+    @objc private func chooseCharacter(_ sender: NSMenuItem) {
+        chosenCharacter = sender.representedObject as? String
+        applyCharacter()
+    }
+
+    @objc private func addCharacter() {
+        let open = NSOpenPanel()
+        open.allowedContentTypes = [.image]
+        open.message = "캐릭터로 쓸 그림을 고르세요. 배경이 투명한 PNG가 가장 자연스럽습니다."
+        NSApp.activate(ignoringOtherApps: true)
+        guard open.runModal() == .OK, let url = open.url else { return }
+        do {
+            let name = try Self.saveCharacter(from: url, into: charactersFolder)
+            chosenCharacter = name
+            applyCharacter()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "이 그림은 캐릭터로 쓸 수 없습니다."
+            alert.informativeText = "\(error)"
+            alert.runModal()
+        }
+    }
+
+    @objc private func deleteCharacter() {
+        guard let name = chosenCharacter else { return }
+        let alert = NSAlert()
+        alert.messageText = "'\((name as NSString).deletingPathExtension)' 캐릭터를 삭제할까요?"
+        alert.informativeText = "기본 펫으로 돌아갑니다."
+        alert.addButton(withTitle: "삭제"); alert.addButton(withTitle: "취소")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        try? FileManager.default.removeItem(at: charactersFolder.appendingPathComponent(name))
+        chosenCharacter = nil
+        applyCharacter()
+    }
+
+    /// Copies any image as a PNG no taller than twice the drawn height (keeps the per-pixel scan quick),
+    /// named after the source file, with " 2", " 3"… on a clash. Returns the saved file name.
+    static func saveCharacter(from source: URL, into folder: URL) throws -> String {
+        guard let image = NSImage(contentsOf: source), image.size.width > 0, image.size.height > 0 else {
+            throw PetError.invalid("그림 파일을 읽지 못했습니다.")
+        }
+        let scale = min(1, CatView.spriteHeight * 2 / image.size.height)
+        let width = max(1, Int(image.size.width * scale)), height = max(1, Int(image.size.height * scale))
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height, bitsPerSample: 8, samplesPerPixel: 4,
+                                            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            throw PetError.invalid("그림을 변환하지 못했습니다.")
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        image.draw(in: NSRect(x: 0, y: 0, width: width, height: height))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw PetError.invalid("그림을 변환하지 못했습니다.") }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let stem = source.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "/", with: "-")
+        var name = "\(stem).png", copy = 2
+        while FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path) { name = "\(stem) \(copy).png"; copy += 1 }
+        try png.write(to: folder.appendingPathComponent(name), options: .atomic)
+        return name
     }
 
     private func remaining(_ until: Date?) -> String {
@@ -1393,7 +1536,7 @@ final class PetController: NSObject, NSApplicationDelegate {
         if source == .messages {
             return ContactReaders(source: source, identifiers: config.messageHandles, reusing: previous) { MessagesReader(handle: $0) }
         }
-        return ContactReaders(source: source, identifiers: config.kakaoNames, reusing: previous) { KakaoCombinedReader(name: $0, fallbackGrace: 0.5) }
+        return ContactReaders.kakao(identifiers: config.kakaoNames, reusing: previous, fallbackGrace: 0.5)
     }
 
     private static func changedSources(from previous: SourcesConfig, to config: SourcesConfig) -> Set<PetSource> {
@@ -1470,11 +1613,16 @@ final class PetController: NSObject, NSApplicationDelegate {
     }
 
     /// Off the main thread. Reader outboxes are acknowledged only after durable queue acceptance.
-    private func pollLocalSources() throws -> ReaderStatuses? {
+    private func pollSnapshot() throws -> (ReaderStatuses?, [PetEvent], [ConversationKey: Date]) {
+        var waiting = try queue.pending(), marks = try queue.reads()
+        let statuses = try pollLocalSources(waiting: &waiting, marks: &marks)
+        return (statuses, waiting, marks)
+    }
+
+    private func pollLocalSources(waiting: inout [PetEvent], marks: inout [ConversationKey: Date]) throws -> ReaderStatuses? {
         let now = Date()
         guard now.timeIntervalSince(lastSourcesPoll) >= 0.45 else { return nil }
         lastSourcesPoll = now
-        let waiting = try queue.pending()
         var statuses = ReaderStatuses()
         for reader in localReaders {
             reader.restorePending(waiting)
@@ -1487,14 +1635,28 @@ final class PetController: NSObject, NSApplicationDelegate {
                 statuses.accessibility = kakao.accessibilityStatus
                 statuses.notifications = kakao.notificationStatus
             }
-            for (key, at) in batch.reads { try queue.markRead(key, at: at) }
-            let marks = try queue.reads()
+            var readFailed = false
+            for (key, at) in batch.reads {
+                do {
+                    try queue.markRead(key, at: at)
+                    marks[key] = max(marks[key] ?? .distantPast, at)
+                    waiting.removeAll { $0.conversation.isRead(observedAt: $0.observedAt, in: marks) }
+                } catch {
+                    // markRead may commit its watermark before an inbox deletion fails.
+                    if let recovered = try? queue.reads() {
+                        for (key, at) in recovered { marks[key] = max(marks[key] ?? .distantPast, at) }
+                        waiting.removeAll { $0.conversation.isRead(observedAt: $0.observedAt, in: marks) }
+                    }
+                    readFailed = true; break
+                }
+            }
+            if readFailed { continue } // A failed write is retried by this reader, without stopping others.
             var accepted = Set<String>()
             for event in batch.events {
                 let expired = PetEvent.date(event.observedAt).map { now.timeIntervalSince($0) > EventQueue.retention } ?? true
                 if !expired && !event.conversation.isRead(observedAt: event.observedAt, in: marks) {
-                    do { try queue.enqueue(event) }
-                    catch PetError.queueFull { break } // still drain the existing queue; reader retries the rest
+                    do { if try queue.enqueue(event) { waiting.append(event) } }
+                    catch { break } // Acknowledge the accepted prefix; this reader retries the rest on any write failure.
                 }
                 accepted.insert(event.identity)
             }
@@ -1536,7 +1698,7 @@ final class PetController: NSObject, NSApplicationDelegate {
         let generation = queueGeneration
         io.async { [weak self] in
             guard let self else { return }
-            let result = Result { (try self.pollLocalSources(), try self.queue.pending(), try self.queue.reads()) }
+            let result = Result { try self.pollSnapshot() }
             DispatchQueue.main.async {
                 self.pollInFlight = false
                 guard generation == self.queueGeneration else { return }
@@ -1793,7 +1955,7 @@ final class PetController: NSObject, NSApplicationDelegate {
             if arrow.isDragging { tuckArrowCenter = NSPoint(x: arrow.frame.midX, y: arrow.frame.midY) }
             Orbit.tuckAnchor = tuckArrowCenter
         } else { Orbit.tuckAnchor = nil; tuckArrowCenter = nil }
-        if !bubble.isHidden { bubble.update(pet: pet, area: area, animated: animated) }
+        if !bubble.isHidden { bubble.update(pet: pet, area: area, animated: animated, petIsSolid: !isTucked && !isHidden) }
         // The arrow appears whenever something is hidden — the pet, or just its bubbles — so a click always undoes it.
         let tucked = isHidden || isTucked || paused
         arrow.isHidden = !tucked
@@ -1812,9 +1974,10 @@ final class PetController: NSObject, NSApplicationDelegate {
         arrow.toward = NSPoint(x: visible.midX, y: visible.midY)
         arrow.walls = [Wall(point: NSPoint(x: area.minX, y: 0), normal: NSPoint(x: -1, y: 0)), Wall(point: NSPoint(x: area.maxX, y: 0), normal: NSPoint(x: 1, y: 0)),
                        Wall(point: NSPoint(x: 0, y: area.minY), normal: NSPoint(x: 0, y: -1)), Wall(point: NSPoint(x: 0, y: area.maxY), normal: NSPoint(x: 0, y: 1))]
-        arrow.toolTip = isTucked ? "펫 \(remaining(tuckedUntil)) · 클릭하면 바로 꺼내기"
+        let tip = isTucked ? "펫 \(remaining(tuckedUntil)) · 클릭하면 바로 꺼내기"
             : isHidden ? "펫 \(remaining(hidePetUntil)) · 클릭하면 바로 보기"
             : paused ? "말풍선 \(remaining(hideBubblesUntil)) · 클릭하면 바로 보기" : "말풍선 잠깐 숨기기"
+        if arrow.toolTip != tip { arrow.toolTip = tip }
         arrow.step(animated: animated)
     }
 
@@ -2008,6 +2171,127 @@ final class PetController: NSObject, NSApplicationDelegate {
         catch { fputs("Could not save pet geometry report\n", stderr) }
     }
 
+    /// A tucked pet must have no physical effect, even when its old frame overlaps the messages.
+    /// Run the live layout/springs, comparing each corner with the same pet moved far off-screen.
+    private func checkBubbleGeometry(to output: URL, requireIdle: Bool = false) {
+        let area = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let corners: [(String, NSPoint)] = [("bottom-left", .zero), ("bottom-right", NSPoint(x: 1440, y: 0)),
+            ("top-left", NSPoint(x: 0, y: 900)), ("top-right", NSPoint(x: 1440, y: 900))]
+        var cases = 0, settled = true, independent = true, inside = true, complete = true
+        var maxGoalError: CGFloat = 0, maxOutlineError: CGFloat = 0
+        var details: [[String: Any]] = []
+        var idleRedraws = 0, idleArrowRedraws = 0
+        let fixtures = fullSourceEvents((4, 4, 4))
+        for (corner, anchor) in corners {
+            for long in [false, true] {
+                let events = fixtures.map { event in
+                    PetEvent(eventId: event.eventId, sender: event.sender,
+                        text: long ? String(repeating: "긴 메시지와 링크 https://example.invalid/12345 확인. ", count: 12) : event.text,
+                        threadUrl: event.threadUrl, observedAt: event.observedAt, kind: event.kind, source: event.source)
+                }
+                var reference: [String: [NSPoint]] = [:]
+                for overlapping in [false, true] {
+                    var caseGoalError: CGFloat = 0
+                    let desk = Desk(frame: area)
+                    desk.appearance = NSAppearance(named: .aqua)
+                    bubble = BubbleField(frame: area); arrow = HideArrow(frame: .zero)
+                    desk.addSubview(bubble); desk.addSubview(arrow)
+                    hidePetUntil = nil; hideBubblesUntil = nil
+                    tuckedUntil = Date().addingTimeInterval(600); tuckArrowCenter = anchor
+                    Orbit.tuckAnchor = nil; arrowKey = ""
+                    let pet = overlapping ? NSRect(x: anchor.x == 0 ? 0 : area.maxX - 140,
+                        y: anchor.y == 0 ? 0 : area.maxY - 360, width: 140, height: 360)
+                        : NSRect(x: -2000, y: -2000, width: 140, height: 360)
+                    // Arrivals grow from one bubble to the full mixed-source stack while already tucked.
+                    for count in 1...events.count {
+                        bubble.show(Array(events.prefix(count)))
+                        for _ in 0..<8 { place(pet: pet, area: area, animated: true) }
+                    }
+                    for tick in 0..<240 {
+                        let before = bubble.subviews.compactMap { $0 as? BubbleView }.map(\.redrawRequests).reduce(0, +)
+                        let arrowBefore = arrow.redrawRequests
+                        place(pet: pet, area: area, animated: true)
+                        guard tick >= 220 else { continue }
+                        if requireIdle { idleRedraws += bubble.subviews.compactMap { $0 as? BubbleView }.map(\.redrawRequests).reduce(0, +) - before }
+                        if requireIdle { idleArrowRedraws += arrow.redrawRequests - arrowBefore }
+                        for view in bubble.subviews.compactMap({ $0 as? BubbleView }) {
+                            let f = view.footprintNow, g = view.goal
+                            let error = max(abs(f.minX - g.minX), abs(f.minY - g.minY), abs(f.width - g.width), abs(f.height - g.height))
+                            maxGoalError = max(maxGoalError, error)
+                            caseGoalError = max(caseGoalError, error)
+                            settled = settled && error < 1
+                            inside = inside && area.insetBy(dx: -1, dy: -1).contains(f)
+                        }
+                    }
+                    details.append(["corner": corner, "long": long, "overlappingPet": overlapping, "goalError": caseGoalError])
+                    desk.layoutSubtreeIfNeeded()
+                    let views = bubble.subviews.compactMap { $0 as? BubbleView }
+                    complete = complete && views.count == events.count
+                        && Set(views.compactMap { $0.event?.identity }) == Set(events.map(\.identity))
+                    for view in views {
+                        guard let identity = view.event?.identity else { independent = false; continue }
+                        let path = view.blob
+                        var points: [NSPoint] = []
+                        var element = [NSPoint](repeating: .zero, count: 3)
+                        for index in 0..<path.elementCount {
+                            let kind = path.element(at: index, associatedPoints: &element)
+                            let count = kind == .curveTo ? 3 : kind == .closePath ? 0 : 1
+                            points.append(contentsOf: element.prefix(count))
+                        }
+                        if !overlapping { reference[identity] = points }
+                        else if let expected = reference[identity], expected.count == points.count {
+                            for (a, b) in zip(points, expected) {
+                                let error = hypot(a.x - b.x, a.y - b.y)
+                                maxOutlineError = max(maxOutlineError, error)
+                                independent = independent && error < 1
+                            }
+                        } else { independent = false }
+                    }
+                    if overlapping, let bitmap = desk.bitmapImageRepForCachingDisplay(in: area) {
+                        desk.cacheDisplay(in: area, to: bitmap)
+                        try? bitmap.representation(using: .png, properties: [:])?.write(to:
+                            output.deletingLastPathComponent().appendingPathComponent("\(corner)-\(long ? "long" : "short").png"))
+                    }
+                }
+                cases += 1
+            }
+        }
+        Orbit.tuckAnchor = nil
+        let probe = bubble.subviews.compactMap { $0 as? BubbleView }.first!
+        let walls = probe.walls
+        let unchanged = probe.redrawRequests
+        probe.walls = walls
+        let sameWallsStayQuiet = probe.redrawRequests == unchanged
+        let changed = probe.redrawRequests
+        probe.walls = walls + [Wall(point: .zero, normal: NSPoint(x: 1, y: 0))]
+        let wallChangesInvalidate = probe.redrawRequests > changed
+        let moved = probe.redrawRequests
+        probe.shove(NSPoint(x: 6, y: 0))
+        let movementInvalidates = probe.redrawRequests > moved
+        probe.step(animated: false)
+        let resized = probe.redrawRequests
+        probe.goal.size.width += 4; probe.step(animated: true)
+        let resizeInvalidates = probe.redrawRequests > resized
+        probe.step(animated: false); probe.alphaValue = 0
+        let faded = probe.redrawRequests
+        probe.step(animated: true)
+        let fadeInvalidates = probe.redrawRequests > faded
+        arrow.tucked = true; arrow.count = 2
+        let pulseBefore = arrow.redrawRequests
+        arrow.pulse += 0.12
+        let alertPulseInvalidates = arrow.redrawRequests > pulseBefore
+        let idleOK = idleRedraws == 0 && idleArrowRedraws == 0 && sameWallsStayQuiet && wallChangesInvalidate && movementInvalidates && resizeInvalidates && fadeInvalidates && alertPulseInvalidates
+        let report: [String: Any] = ["cases": cases, "settled": settled, "insideScreen": inside,
+            "hiddenPetHasNoEffect": independent, "maxGoalError": maxGoalError, "maxOutlineError": maxOutlineError,
+            "allMessagesPresent": complete, "details": details, "idleRedraws": idleRedraws,
+            "idleArrowRedraws": idleArrowRedraws, "alertPulseInvalidates": alertPulseInvalidates,
+            "sameWallsStayQuiet": sameWallsStayQuiet, "wallChangesInvalidate": wallChangesInvalidate,
+            "movementInvalidates": movementInvalidates, "resizeInvalidates": resizeInvalidates, "fadeInvalidates": fadeInvalidates,
+            "ok": settled && independent && inside && complete && (!requireIdle || idleOK)]
+        do { try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output) }
+        catch { fputs("Could not save bubble geometry report\n", stderr) }
+    }
+
     /// Deliberately numeric-only. Runs the production reader with this app's signing identity.
     private func measureLiveAccessibility() {
         guard let config = try? SourcesConfig.load(paths: paths) else { print("[0]"); return }
@@ -2132,6 +2416,66 @@ final class PetController: NSObject, NSApplicationDelegate {
         } catch { fputs("Could not save source read smoke report\n", stderr) }
     }
 
+    /// Actual queue failures with fake readers; never opens a user's source database.
+    private func checkSourceFailures(to output: URL) {
+        final class FixtureReader: LocalSourceReader {
+            let source: PetSource
+            let batch: SourcePoll
+            var accepted = Set<String>()
+            init(_ source: PetSource, _ batch: SourcePoll) { self.source = source; self.batch = batch }
+            func poll(now: Date) -> SourcePoll { batch }
+            func acknowledge(_ identities: Set<String>) { accepted.formUnion(identities) }
+        }
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
+        let root = paths.root.resolvingSymlinksInPath().path
+        guard ProcessInfo.processInfo.environment["INSTAGRAMPET_HOME"] != nil,
+              root.hasPrefix(temporary + "/") || root.hasPrefix("/private/tmp/") else { return }
+        queue = EventQueue(paths: paths)
+        var results: [Bool] = []
+        for readFailure in [false, true] {
+            do {
+                try queue.clear()
+                func event(_ id: String, _ source: PetSource, text: String = "synthetic") -> PetEvent {
+                    PetEvent(eventId: "failure-\(readFailure)-\(id)", sender: "fixture.sender", text: text,
+                        threadUrl: ConversationKey.local(source, identifier: "fixture@example.invalid").key,
+                        observedAt: PetEvent.timestamp(), kind: "thread-message", source: source)
+                }
+                let good = event("first", .messages), bad = event("bad", .messages, text: ""), tail = event("tail", .messages)
+                let other = event("other", .kakao)
+                let first = FixtureReader(.messages, SourcePoll(events: [good, bad, tail],
+                    reads: readFailure ? [ConversationKey(source: .messages, key: "invalid"): Date()] : [:], status: .observing))
+                let second = FixtureReader(.kakao, SourcePoll(events: [other], status: .observing))
+                localReaders = [first, second]; lastSourcesPoll = .distantPast
+                let (_, waiting, _) = try pollSnapshot()
+                let expected = readFailure ? Set([other.identity]) : Set([good.identity, other.identity])
+                results.append(Set(waiting.map(\.identity)) == expected && second.accepted == [other.identity]
+                    && first.accepted == (readFailure ? [] : [good.identity]))
+            } catch { results.append(false) }
+        }
+        do {
+            try queue.clear()
+            let read = PetEvent(eventId: "partial-read", sender: "fixture.sender", text: "synthetic",
+                threadUrl: ConversationKey.local(.messages, identifier: "fixture@example.invalid").key,
+                observedAt: PetEvent.timestamp(), kind: "thread-message", source: .messages)
+            try queue.enqueue(read)
+            let file = try FileManager.default.contentsOfDirectory(at: paths.inbox, includingPropertiesForKeys: nil).first { $0.pathExtension == "json" }!
+            try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: file.path)
+            defer { try? FileManager.default.setAttributes([.immutable: false], ofItemAtPath: file.path); try? queue.clear() }
+            let first = FixtureReader(.messages, SourcePoll(reads: [read.conversation: Date()], status: .observing))
+            let other = PetEvent(eventId: "partial-read-other", sender: "fixture.sender", text: "synthetic",
+                threadUrl: ConversationKey.local(.kakao, identifier: "Fixture Other").key,
+                observedAt: PetEvent.timestamp(), kind: "thread-message", source: .kakao)
+            let second = FixtureReader(.kakao, SourcePoll(events: [other], status: .observing))
+            localReaders = [first, second]; lastSourcesPoll = .distantPast
+            let (_, waiting, marks) = try pollSnapshot()
+            results.append(FileManager.default.fileExists(atPath: file.path) && waiting.map(\.identity) == [other.identity]
+                && second.accepted == [other.identity]
+                && read.conversation.isRead(observedAt: read.observedAt, in: marks))
+        } catch { results.append(false) }
+        let report: [String: Any] = ["cases": results.count, "ok": results.count == 3 && results.allSatisfy { $0 }]
+        try? JSONSerialization.data(withJSONObject: report).write(to: output)
+    }
+
     private func checkSourceCapacity() -> Bool {
         // Never use the user's queue when a smoke flag is invoked without an isolated home.
         let resolved = paths.root.resolvingSymlinksInPath().path
@@ -2162,11 +2506,11 @@ final class PetController: NSObject, NSApplicationDelegate {
                 observedAt: PetEvent.timestamp(), kind: "thread-message", source: .messages)
             let reader = FixtureReader(value)
             localReaders = [reader]; lastSourcesPoll = .distantPast
-            _ = try pollLocalSources()
+            _ = try pollSnapshot()
             guard reader.accepted.isEmpty, try queue.pending().count == EventQueue.capacity else { return false }
             try queue.consume(first!)
             lastSourcesPoll = .distantPast
-            _ = try pollLocalSources()
+            _ = try pollSnapshot()
             let remaining = try queue.count()
             return reader.accepted == [value.identity] && remaining == EventQueue.capacity
         } catch { return false }
@@ -2476,13 +2820,14 @@ final class PetController: NSObject, NSApplicationDelegate {
         // Transparent space must allow interaction with the application underneath.
         if !isHidden && !isTucked {
             let over = catBounds.contains(panel.convertPoint(fromScreen: mouse))
-            panel.ignoresMouseEvents = !over
+            if panel.ignoresMouseEvents == over { panel.ignoresMouseEvents = !over }
             // An open hand over the pet (re-asserted on every move, since other apps reset the cursor).
             if over { NSCursor.openHand.set() } else if overPet { NSCursor.arrow.set() }
             overPet = over
         } else if overPet { NSCursor.arrow.set(); overPet = false }
         let point = overlay.convertPoint(fromScreen: mouse)
-        overlay.ignoresMouseEvents = bubble.hitTest(point) == nil && arrow.hitTest(point) == nil
+        let ignores = bubble.hitTest(point) == nil && arrow.hitTest(point) == nil
+        if overlay.ignoresMouseEvents != ignores { overlay.ignoresMouseEvents = ignores }
     }
 
     /// A drop that leaves almost nothing of the pet on screen tucks it away behind its arrow.

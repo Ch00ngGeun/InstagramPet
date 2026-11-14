@@ -29,6 +29,8 @@ public final class MessagesReader: LocalSourceReader {
     private enum Failure: Error { case permission, unavailable, busy }
     private static let capacity = 200
     private static let lifetime: TimeInterval = 12 * 60 * 60
+    private static let bodyWait: TimeInterval = 30
+    private static let missingBody = "(메시지)"
     private let handle: String?
     private let databaseURL: URL
     private let conversation: ConversationKey?
@@ -39,6 +41,7 @@ public final class MessagesReader: LocalSourceReader {
     private var watched: [Int64: Watched] = [:]
     private var outbox: [String: PetEvent] = [:]
     private var readThrough: Date?
+    private var pendingDeletedThrough: Date?
     private var restoring: [PetEvent] = []
 
     public init(handle: String?, databaseURL: URL = MessagesReader.defaultDatabaseURL) {
@@ -65,7 +68,8 @@ public final class MessagesReader: LocalSourceReader {
         let expiry = now.addingTimeInterval(-Self.lifetime)
         watched = watched.filter { $0.value.observedAt >= expiry }
         outbox = outbox.filter { (PetEvent.date($0.value.observedAt) ?? .distantPast) >= expiry }
-        unresolved = unresolved.filter { now.timeIntervalSince($0.value.firstObservedAt) <= 30 }
+        unresolved = unresolved.filter { $0.value.firstObservedAt >= expiry }
+        if let deleted = pendingDeletedThrough, deleted < expiry { pendingDeletedThrough = nil }
         do {
             let identity = try fileIdentity()
             if databaseIdentity != identity {
@@ -84,15 +88,16 @@ public final class MessagesReader: LocalSourceReader {
             guard let database, sqlite3_db_readonly(database, "main") == 1 else { throw Failure.unavailable }
             sqlite3_busy_timeout(database, 150)
             let maximum = try maxRowID(database)
-            if let cursor, maximum < cursor { watched.removeAll() }
             try restoreTrackedRows(database, handle: handle, now: now)
-            guard let cursor, maximum >= cursor, let baselineAt else {
+            guard let cursor, let baselineAt else {
                 self.cursor = maximum
                 self.baselineAt = now
                 unresolved.removeAll()
                 try updateReads(database, conversation: conversation)
                 return batch(.observing)
             }
+            // Deleting the highest ROWID shrinks the cursor, not the lifetime of earlier pending bodies.
+            let lowerCursor = min(cursor, maximum)
 
             if !unresolved.isEmpty {
                 let ids = unresolved.keys.sorted()
@@ -105,9 +110,9 @@ public final class MessagesReader: LocalSourceReader {
             // Stop at the bound rather than discarding unacknowledged events or unread tracking.
             let occupied = Set(watched.values.map(\.identity)).union(outbox.keys).count + unresolved.count
             let room = max(0, Self.capacity - occupied)
-            var nextCursor = cursor
+            var nextCursor = lowerCursor
             if room > 0 {
-                let fresh = try rows(database, handle: handle, selection: "m.ROWID > ? AND m.ROWID <= ?", values: [cursor, maximum], limit: room)
+                let fresh = try rows(database, handle: handle, selection: "m.ROWID > ? AND m.ROWID <= ?", values: [lowerCursor, maximum], limit: room)
                 for row in fresh { try receive(row, database: database, baselineAt: baselineAt, now: now, conversation: conversation) }
                 nextCursor = fresh.count < room ? maximum : (fresh.last?.id ?? maximum)
             }
@@ -129,6 +134,7 @@ public final class MessagesReader: LocalSourceReader {
         baselineAt = nil
         unresolved.removeAll()
         watched.removeAll()
+        pendingDeletedThrough = nil
     }
 
     private func batch(_ status: SourceStatus) -> SourcePoll {
@@ -183,12 +189,13 @@ public final class MessagesReader: LocalSourceReader {
         let compact = "replace(replace(replace(replace(replace(trim(h.id), ' ', ''), '-', ''), '(', ''), ')', ''), '.', '')"
         let phone = "CASE WHEN substr(\(compact),1,4)='0082' THEN '+' || substr(\(compact),3) WHEN substr(\(compact),1,3)='010' AND length(\(compact))=11 THEN '+82' || substr(\(compact),2) ELSE \(compact) END"
         let normalized = handle.contains("@") ? "lower(trim(h.id))" : phone
+        let ordinaryMessage = try hasAssociatedMessageType(database) ? "COALESCE(m.associated_message_type,0)=0" : "1"
         let sql = """
             SELECT m.ROWID, substr(m.text,1,4000),
                    CASE WHEN length(m.attributedBody)<=65536 THEN m.attributedBody ELSE NULL END,
                    m.is_read, m.date
             FROM message m JOIN handle h ON h.ROWID=m.handle_id
-            WHERE m.is_from_me=0 AND \(normalized)=? AND \(selection)
+            WHERE m.is_from_me=0 AND \(ordinaryMessage) AND \(normalized)=? AND \(selection)
               AND EXISTS (
                 SELECT 1 FROM chat_message_join cm JOIN chat_handle_join peer ON peer.chat_id=cm.chat_id
                 WHERE cm.message_id=m.ROWID AND peer.handle_id=h.ROWID
@@ -223,6 +230,18 @@ public final class MessagesReader: LocalSourceReader {
         return result
     }
 
+    /// Older databases do not expose the reaction type column.
+    private func hasAssociatedMessageType(_ database: OpaquePointer) throws -> Bool {
+        let query = try statement(database, "PRAGMA table_info(message)")
+        defer { sqlite3_finalize(query) }
+        while true {
+            let code = sqlite3_step(query)
+            try verify(code)
+            if code == SQLITE_DONE { return false }
+            if text(query, column: 1) == "associated_message_type" { return true }
+        }
+    }
+
     private func text(_ query: OpaquePointer, column: Int32) -> String? {
         guard let bytes = sqlite3_column_text(query, column) else { return nil }
         return String(data: Data(bytes: bytes, count: Int(sqlite3_column_bytes(query, column))), encoding: .utf8)
@@ -252,10 +271,13 @@ public final class MessagesReader: LocalSourceReader {
         // Use the wire timestamp's precision for watermarks too: two observations in one millisecond
         // must remain a tie, otherwise rounding could make the newer unread bubble look older.
         let observedAt = unresolved[row.id]?.firstObservedAt ?? (PetEvent.date(PetEvent.timestamp(now)) ?? now)
-        let text = try messageText(row, database: database)
-        guard !text.isEmpty else {
-            if unresolved[row.id] == nil { unresolved[row.id] = WaitingBody(firstObservedAt: observedAt) }
-            return
+        var text = try messageText(row, database: database)
+        if text.isEmpty {
+            guard now.timeIntervalSince(observedAt) >= Self.bodyWait else {
+                if unresolved[row.id] == nil { unresolved[row.id] = WaitingBody(firstObservedAt: observedAt) }
+                return
+            }
+            text = Self.missingBody
         }
         guard let fingerprint = rowFingerprint(row) else { return }
         let event = PetEvent(eventId: "messages-" + String(format: "%020lld", row.id) + "-" + fingerprint + "-" + UUID().uuidString, sender: "local.messages", displayName: "Messages",
@@ -302,30 +324,45 @@ public final class MessagesReader: LocalSourceReader {
         let found = try rows(database, handle: handle, selection: "m.ROWID IN (\(ids.map { _ in "?" }.joined(separator: ",")))", values: ids, limit: Self.capacity)
         for row in found {
             guard let (event, expected, observed) = candidates[row.id], rowFingerprint(row) == expected else { continue }
-            guard try messageText(row, database: database) == event.text else { continue }
+            let body = try messageText(row, database: database)
+            // A fallback still belongs to this fingerprinted row if its body hydrated later.
+            guard body == event.text || event.text == Self.missingBody else { continue }
             watched[row.id] = Watched(identity: event.identity, observedAt: observed)
         }
     }
 
     private func updateReads(_ database: OpaquePointer, conversation: ConversationKey) throws {
-        guard !watched.isEmpty else { return }
+        guard !watched.isEmpty || pendingDeletedThrough != nil else { return }
         let ids = watched.keys.sorted()
-        let query = try statement(database, "SELECT ROWID,is_read FROM message WHERE is_from_me=0 AND ROWID IN (\(ids.map { _ in "?" }.joined(separator: ",")))")
-        defer { sqlite3_finalize(query) }
-        for (index, id) in ids.enumerated() { try verify(sqlite3_bind_int64(query, Int32(index + 1), id)) }
-        var read = Set<Int64>()
-        while true {
-            let code = sqlite3_step(query)
-            try verify(code)
-            if code == SQLITE_DONE { break }
-            if sqlite3_column_int(query, 1) == 1 { read.insert(sqlite3_column_int64(query, 0)) }
+        var read = Set<Int64>(), present = Set<Int64>()
+        if !ids.isEmpty {
+            let query = try statement(database, "SELECT ROWID,is_read FROM message WHERE is_from_me=0 AND ROWID IN (\(ids.map { _ in "?" }.joined(separator: ",")))")
+            defer { sqlite3_finalize(query) }
+            for (index, id) in ids.enumerated() { try verify(sqlite3_bind_int64(query, Int32(index + 1), id)) }
+            while true {
+                let code = sqlite3_step(query)
+                try verify(code)
+                if code == SQLITE_DONE { break }
+                let id = sqlite3_column_int64(query, 0)
+                present.insert(id)
+                if sqlite3_column_int(query, 1) == 1 { read.insert(id) }
+            }
         }
-        // A later read row must never erase an earlier still-unread row (or a missing/unknown row).
+        for id in ids where !present.contains(id) {
+            if let removed = watched.removeValue(forKey: id) {
+                outbox.removeValue(forKey: removed.identity)
+                pendingDeletedThrough = max(pendingDeletedThrough ?? .distantPast, removed.observedAt)
+            }
+        }
+        // A later read row must never erase an earlier still-unread row.
         let firstUnread = (watched.filter { !read.contains($0.key) }.map { $0.value.observedAt }
             + unresolved.values.map(\.firstObservedAt)).min() ?? .distantFuture
-        let through = watched.filter { read.contains($0.key) && $0.value.observedAt < firstUnread }.map { $0.value.observedAt }.max()
-        guard let through else { return }
+        var resolved = watched.filter { read.contains($0.key) && $0.value.observedAt < firstUnread }.map { $0.value.observedAt }
+        // Keep only the furthest deletion until older unread messages permit a safe watermark.
+        if let deleted = pendingDeletedThrough, deleted < firstUnread { resolved.append(deleted) }
+        guard let through = resolved.max() else { return }
         readThrough = max(readThrough ?? .distantPast, through)
+        if let deleted = pendingDeletedThrough, deleted <= through { pendingDeletedThrough = nil }
         for (id, value) in watched where value.observedAt <= through {
             watched.removeValue(forKey: id)
             outbox.removeValue(forKey: value.identity)

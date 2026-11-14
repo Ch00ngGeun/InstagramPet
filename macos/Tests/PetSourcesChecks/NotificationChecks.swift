@@ -91,8 +91,105 @@ private func notificationEvent(_ id: String, text: String = "synthetic notificat
         observedAt: PetEvent.timestamp(date), kind: kind, source: .kakao)
 }
 
+private func sharedKakaoTree(_ rows: [(String, String, String?)]) -> KakaoAXNode {
+    let area = CGRect(x: 0, y: 0, width: 400, height: 600)
+    let children = rows.enumerated().map { index, item in
+        let (name, preview, badge) = item, y = CGFloat(50 + index * 90)
+        var fields = [
+            KakaoAXNode(role: "AXStaticText", value: name, frame: CGRect(x: 60, y: y + 10, width: 160, height: 20)),
+            KakaoAXNode(role: "AXStaticText", value: preview, frame: CGRect(x: 60, y: y + 42, width: 220, height: 18)),
+            KakaoAXNode(role: "AXStaticText", value: "오후 1:23", frame: CGRect(x: 310, y: y + 10, width: 70, height: 18))
+        ]
+        if let badge {
+            fields.append(KakaoAXNode(role: "AXStaticText", value: badge, label: "읽지 않은 메시지", identifier: "unread-count",
+                frame: CGRect(x: 355, y: y + 45, width: 25, height: 20)))
+        }
+        return KakaoAXNode(role: "AXRow", frame: CGRect(x: 0, y: y, width: 400, height: 80), children: fields)
+    }
+    return KakaoAXNode(role: "AXApplication", children: [KakaoAXNode(role: "AXWindow", title: "KakaoTalk", frame: area,
+        children: [KakaoAXNode(role: "AXTable", frame: area, children: children)])])
+}
+
 func notificationChecks() -> [(String, () throws -> Void)] {
     [
+        ("Kakao contacts share one AX capture and notification session per explicit poll, including repeated timestamps", {
+            let f = try NotificationFixture(), start = Date().addingTimeInterval(-10)
+            let names = ["Fixture A", "Fixture B", "Fixture C"]
+            var captures = 0, sessions = 0, capturedNames: [String] = []
+            var root = sharedKakaoTree(names.map { ($0, "old synthetic", "1") })
+            let readers = ContactReaders.kakao(identifiers: names, databaseURL: f.databaseURL, fallbackGrace: 0,
+                capture: { selected in captures += 1; capturedNames = selected; return .snapshot(pid: 7, root: root) },
+                databaseSessionOpened: { sessions += 1 })
+            try sourceCheck(readers.poll(now: start).events.isEmpty)
+            try sourceCheck(captures == 1 && sessions == 1, "three contacts repeated AX capture or notification DB open: \(captures)/\(sessions)")
+            try sourceCheck(Set(capturedNames) == Set(names), "shared capture did not include every selected name")
+            try f.add("new A synthetic", at: start.addingTimeInterval(0.1), title: names[0])
+            root = sharedKakaoTree([(names[0], "new A synthetic", "2"), (names[1], "new B synthetic", "2"), (names[2], "old synthetic", "1")])
+            let batch = readers.poll(now: start.addingTimeInterval(1))
+            try sourceCheck(batch.events.count == 2 && Set(batch.events.map(\.conversation)) == Set(names.prefix(2).map { ConversationKey.local(.kakao, identifier: $0) }), "shared inputs lost a contact or duplicated AX/notification delivery")
+            readers.acknowledge(Set(batch.events.map(\.identity)))
+            root = sharedKakaoTree([(names[0], "new A synthetic", nil), (names[1], "new B synthetic", "2"), (names[2], "old synthetic", "1")])
+            _ = readers.poll(now: start.addingTimeInterval(2))
+            let read = readers.poll(now: start.addingTimeInterval(2))
+            try sourceCheck(captures == 4 && sessions == 4, "same-timestamp polls reused an obsolete shared snapshot")
+            try sourceCheck(Set(read.reads.keys) == [ConversationKey.local(.kakao, identifier: names[0])], "shared capture crossed contact read boundaries")
+        }),
+        ("Kakao shared inputs survive contact changes while retaining old baselines and quietly adding new contacts", {
+            let f = try NotificationFixture(), start = Date().addingTimeInterval(-10)
+            let names = ["Fixture A", "Fixture B", "Fixture C"]
+            var captures = 0, sessions = 0, selectedNames: [String] = []
+            var root = sharedKakaoTree(names.map { ($0, "old synthetic", "1") })
+            let first = ContactReaders.kakao(identifiers: [names[0], names[2]], databaseURL: f.databaseURL, fallbackGrace: 0,
+                capture: { selected in captures += 1; selectedNames = selected; return .snapshot(pid: 7, root: root) },
+                databaseSessionOpened: { sessions += 1 })
+            try sourceCheck(first.poll(now: start).events.isEmpty)
+            try f.add("new A synthetic", at: start.addingTimeInterval(0.1), title: names[0])
+            try f.add("before selection B synthetic", at: start.addingTimeInterval(0.2), title: names[1])
+            root = sharedKakaoTree([(names[0], "new A synthetic", "2"), (names[1], "before selection B synthetic", "2"), (names[2], "old synthetic", "1")])
+            let next = ContactReaders.kakao(identifiers: Array(names.prefix(2)), reusing: first, databaseURL: f.databaseURL, fallbackGrace: 0)
+            let retained = next.poll(now: start.addingTimeInterval(1))
+            try sourceCheck(retained.events.map(\.text) == ["new A synthetic"], "existing baseline reset or newly selected history replayed")
+            try sourceCheck(captures == 2 && sessions == 2 && Set(selectedNames) == Set(names.prefix(2)), "retained/new contacts stopped sharing current inputs")
+            next.acknowledge(Set(retained.events.map(\.identity)))
+            try f.add("after selection B synthetic", at: start.addingTimeInterval(1.1), title: names[1])
+            root = sharedKakaoTree([(names[0], "new A synthetic", "2"), (names[1], "after selection B synthetic", "3")])
+            let added = next.poll(now: start.addingTimeInterval(2))
+            try sourceCheck(added.events.map(\.text) == ["after selection B synthetic"], "new contact did not observe its first post-baseline arrival")
+            let empty = ContactReaders.kakao(identifiers: [], reusing: next, databaseURL: f.databaseURL)
+            try sourceCheck(empty.poll(now: start.addingTimeInterval(3)).status == .disabled)
+            let ambiguous = ContactReaders.kakao(identifiers: ["Fixture", "Fixture💕"], reusing: empty, databaseURL: f.databaseURL)
+            try sourceCheck(ambiguous.poll(now: start.addingTimeInterval(3)).status == .unavailable)
+            try sourceCheck(captures == 3 && sessions == 3, "disabled or ambiguous selections accessed shared inputs")
+        }),
+        ("Kakao shared notification sessions preserve independent contact backpressure and recover without cached failures", {
+            let f = try NotificationFixture(), start = Date().addingTimeInterval(-10)
+            let names = ["Fixture A", "Fixture B"]
+            var captures = 0, sessions = 0
+            let readers = ContactReaders.kakao(identifiers: names, databaseURL: f.databaseURL,
+                capture: { _ in captures += 1; return .idle }, databaseSessionOpened: { sessions += 1 })
+            _ = readers.poll(now: start)
+            for index in 1...200 { try f.add("full A synthetic \(index)", at: start.addingTimeInterval(Double(index) * 0.001), title: names[0]) }
+            let full = readers.poll(now: start.addingTimeInterval(1)).events
+            try sourceCheck(full.count == 200 && full.allSatisfy { $0.conversation == ConversationKey.local(.kakao, identifier: names[0]) })
+            try f.add("waiting A synthetic", at: start.addingTimeInterval(1.1), title: names[0])
+            try f.add("first B synthetic", at: start.addingTimeInterval(1.2), title: names[1])
+            let firstB = readers.poll(now: start.addingTimeInterval(2)).events
+            try sourceCheck(firstB.count == 201 && firstB.filter { $0.text == "first B synthetic" }.count == 1 && !firstB.contains { $0.text == "waiting A synthetic" }, "full contact blocked or consumed another contact's notification")
+            readers.acknowledge(Set(firstB.filter { $0.source == .kakao && $0.conversation == ConversationKey.local(.kakao, identifier: names[1]) }.map(\.identity)))
+            try f.add("second B synthetic", at: start.addingTimeInterval(2.1), title: names[1])
+            let secondB = readers.poll(now: start.addingTimeInterval(3)).events
+            try sourceCheck(secondB.count == 201 && secondB.contains { $0.text == "second B synthetic" } && !secondB.contains { $0.text == "first B synthetic" }, "shared cursors replayed an acknowledged contact or stalled its progress")
+            readers.acknowledge(Set(secondB.map(\.identity)))
+            let recovered = readers.poll(now: start.addingTimeInterval(4)).events
+            try sourceCheck(recovered.map(\.text) == ["waiting A synthetic"], "backpressured contact lost its next notification")
+            readers.acknowledge(Set(recovered.map(\.identity)))
+            try f.execute("BEGIN EXCLUSIVE")
+            _ = readers.poll(now: start.addingTimeInterval(5))
+            try sourceCheck(readers.notificationStatus == .unavailable)
+            try f.execute("COMMIT")
+            _ = readers.poll(now: start.addingTimeInterval(5))
+            try sourceCheck(readers.notificationStatus == .observing && captures == 7 && sessions == 7, "a previous poll's DB failure or inputs survived into the next cycle")
+        }),
         ("Kakao notifications baseline old records, preserve a burst and retry until acknowledgement", {
             let f = try NotificationFixture(), start = Date().addingTimeInterval(-10)
             try f.add("old synthetic", at: start.addingTimeInterval(-20))

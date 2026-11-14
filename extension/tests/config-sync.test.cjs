@@ -145,15 +145,15 @@ test('malformed or unsupported config replies never replace the last valid selec
   }
   assert.equal(f.data.appConfigSync.state, 'unavailable');
 });
-test('changing a thread for the same sender drops obsolete queued events but preserves explicit demos', async () => {
+test('changing a thread for the same sender retains queued events and explicit demos', async () => {
   const f = fixture(); f.reply(response({ username: 'fixture.app', threadId: '333' })); await f.sync.sync();
   f.data.pending = [{ event: { kind: 'thread-message', sender: 'fixture.app', threadUrl: 'https://www.instagram.com/direct/t/333/' } },
     { event: { kind: 'test' } }];
   f.reply(response({ username: 'fixture.app', threadId: '444' })); await f.sync.sync();
-  assert.deepEqual(f.data.pending, [{ event: { kind: 'test' } }]);
+  assert.equal(f.data.pending.length, 2);
   f.data.pending.push({ event: { kind: 'thread-message' } });
   f.reply(new Error('unavailable')); await f.sync.sync();
-  assert.equal(f.data.pending.length, 2);
+  assert.equal(f.data.pending.length, 3);
 });
 test('worker restarts preserve the original manual backup and concurrent sync requests share one job', async () => {
   const f = fixture(); f.reply(response({ username: 'fixture.app', threadId: '333' }));
@@ -214,4 +214,11 @@ test('malformed manual save requests fail without partially sanitizing and stori
     assert.equal((await f.sync.saveManual(value)).ok, false);
     assert.deepEqual(f.data, before);
   }
+});
+test('selection edits preserve still-allowed pending DMs and record only removed senders', async () => {
+  const one={event:{kind:'thread-message',sender:'fixture.one'}},two={event:{kind:'thread-message',sender:'fixture.two'}};
+  const f=fixture({settings:manual(),pending:[one,two]});
+  f.reply(response({username:'fixture.one,fixture.new',threadId:'111,333'}));await f.sync.sync();
+  assert.deepEqual(f.data.pending,[one]);assert.equal(f.data.lastDrop.reason,'selection-changed');
+  f.reply(response({username:'',threadId:''}));await f.sync.sync();assert.deepEqual(f.data.pending,[one]);
 });

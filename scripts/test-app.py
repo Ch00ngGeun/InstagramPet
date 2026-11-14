@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -14,6 +15,41 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 class AppPipelineTest(unittest.TestCase):
+    def test_settled_bubbles_stop_redrawing_but_wall_and_motion_changes_invalidate(self):
+        with tempfile.TemporaryDirectory(prefix='Instagram Pet Idle Render ') as folder:
+            report = Path(folder) / 'idle-report.json'
+            app = subprocess.run([str(PROJECT / 'dist/InstagramPet.app/Contents/MacOS/InstagramPet'),
+                                  '--smoke-idle-render', str(report)],
+                                 env=dict(os.environ, INSTAGRAMPET_HOME=folder), capture_output=True, timeout=30)
+            self.assertEqual(app.returncode, 0, app.stderr)
+            result = json.loads(report.read_text())
+            self.assertTrue(result['ok'], result)
+            self.assertEqual(result['idleRedraws'], 0)
+
+    def test_source_write_failures_acknowledge_accepted_prefix_and_allow_other_readers(self):
+        with tempfile.TemporaryDirectory(prefix='Instagram Pet Source Failure ') as folder:
+            report = Path(folder) / 'failure-report.json'
+            app = subprocess.run([str(PROJECT / 'dist/InstagramPet.app/Contents/MacOS/InstagramPet'),
+                                  '--smoke-source-failures', str(report)],
+                                 env=dict(os.environ, INSTAGRAMPET_HOME=folder), capture_output=True, timeout=15)
+            self.assertEqual(app.returncode, 0, app.stderr)
+            result = json.loads(report.read_text())
+            self.assertTrue(result['ok'], result)
+            self.assertEqual(result['cases'], 3)
+
+    def test_tucked_bubbles_settle_at_every_corner_without_hidden_pet_distortion(self):
+        with tempfile.TemporaryDirectory(prefix='Instagram Pet Bubbles ') as folder:
+            report = Path(folder) / 'bubble-report.json'
+            app = subprocess.run([str(PROJECT / 'dist/InstagramPet.app/Contents/MacOS/InstagramPet'),
+                                  '--smoke-bubble-geometry', str(report)],
+                                 env=dict(os.environ, INSTAGRAMPET_HOME=folder), capture_output=True, timeout=30)
+            self.assertEqual(app.returncode, 0, app.stderr)
+            result = json.loads(report.read_text())
+            # Synthetic desktop previews remain available for visual QA after the temporary home is removed.
+            shutil.copytree(folder, PROJECT / 'work/bubble-geometry', dirs_exist_ok=True)
+            self.assertTrue(result['ok'], result)
+            self.assertEqual(result['cases'], 8)
+
     def test_settings_form_saves_recreates_only_changed_reader_and_preserves_other_sources(self):
         with tempfile.TemporaryDirectory(prefix='Instagram Pet Settings ') as folder:
             report = Path(folder) / 'settings-report.json'

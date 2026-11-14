@@ -26,7 +26,9 @@ struct SettingsDraft {
         var config = SourcesConfig()
         if managesInstagram {
             do {
-                config.instagram = try SourcesConfig(instagram: .init(username: username, threadId: threadId)).validated().instagram
+                // A pasted full DM address counts as its thread number.
+                let ids = threadId.replacingOccurrences(of: #"[^\s,]*/direct/t/([0-9]+)[^\s,]*"#, with: "$1", options: .regularExpression)
+                config.instagram = try SourcesConfig(instagram: .init(username: username, threadId: ids)).validated().instagram
             } catch {
                 throw SettingsFormError(message: "인스타 ID와 대화 번호의 형식·개수를 확인해 주세요. 여러 개는 쉼표(,)로 구분하고 같은 순서로 입력하세요.")
             }

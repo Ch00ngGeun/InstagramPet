@@ -65,7 +65,7 @@ public final class KakaoReader: LocalSourceReader {
         }
         self.conversation = self.name.map { ConversationKey.local(.kakao, identifier: $0) }
         let selectedName = self.name
-        self.capture = capture ?? { Self.systemCapture(name: selectedName, report: captureMetrics) }
+        self.capture = capture ?? { Self.systemCapture(names: selectedName.map { [$0] } ?? [], report: captureMetrics) }
     }
 
     public func acknowledge(_ identities: Set<String>) {
@@ -332,11 +332,11 @@ public final class KakaoReader: LocalSourceReader {
     private enum CaptureFailure: Error { case unavailable }
     private final class AXCapture {
         let pid: pid_t
-        let name: String?
+        let names: [String]
         let deadline = ProcessInfo.processInfo.systemUptime + 0.6
         var count = 0
         var deadlineExceeded = false
-        init(pid: pid_t, name: String?) { self.pid = pid; self.name = name }
+        init(pid: pid_t, names: [String]) { self.pid = pid; self.names = names }
 
         func attribute(_ element: AXUIElement, _ name: String, optionalMetadata: Bool = false) throws -> CFTypeRef? {
             guard ProcessInfo.processInfo.systemUptime < deadline else { deadlineExceeded = true; throw CaptureFailure.unavailable }
@@ -365,10 +365,10 @@ public final class KakaoReader: LocalSourceReader {
         /// Read only shallow name fields in other rows; their previews cannot affect this contact.
         func matchesName(_ element: AXUIElement, depth: Int = 0) throws -> Bool {
             count += 1
-            guard count <= 500, depth <= 4, let name else { throw CaptureFailure.unavailable }
+            guard count <= 500, depth <= 4, !names.isEmpty else { throw CaptureFailure.unavailable }
             guard let role = try string(element, kAXRoleAttribute) else { throw CaptureFailure.unavailable }
             if role == "AXStaticText" {
-                return try string(element, kAXValueAttribute).map { KakaoReader.nameMatches($0, configured: name) } ?? false
+                return try string(element, kAXValueAttribute).map { value in names.contains { KakaoReader.nameMatches(value, configured: $0) } } ?? false
             }
             guard ["AXRow", "AXCell", "AXGroup"].contains(role) else { return false }
             for child in try elements(element, kAXChildrenAttribute) ?? [] {
@@ -405,7 +405,7 @@ public final class KakaoReader: LocalSourceReader {
             let structural: Set<String> = ["AXApplication", "AXWindow", "AXGroup", "AXSplitGroup", "AXScrollArea", "AXTabGroup", "AXTable", "AXOutline", "AXList"]
             if !inList && !structural.contains(role) { return KakaoAXNode(role: role) }
             let rect = try frame(element)
-            if inList && role == "AXRow", name != nil, try !matchesName(element) {
+            if inList && role == "AXRow", !names.isEmpty, try !matchesName(element) {
                 return KakaoAXNode(role: role, frame: rect)
             }
             if inList && ["AXButton", "AXImage"].contains(role) { return KakaoAXNode(role: role, frame: rect) }
@@ -428,7 +428,7 @@ public final class KakaoReader: LocalSourceReader {
         }
     }
 
-    private static func systemCapture(name: String?, report: ((KakaoCaptureMetrics) -> Void)? = nil) -> KakaoCapture {
+    static func systemCapture(names: [String], report: ((KakaoCaptureMetrics) -> Void)? = nil) -> KakaoCapture {
         let started = ProcessInfo.processInfo.systemUptime
         var measured: AXCapture?
         defer {
@@ -440,7 +440,7 @@ public final class KakaoReader: LocalSourceReader {
         guard apps.count == 1, let app = apps.first else { return .unavailable }
         guard AXIsProcessTrusted() else { return .permissionRequired }
         let application = AXUIElementCreateApplication(app.processIdentifier)
-        let capture = AXCapture(pid: app.processIdentifier, name: name)
+        let capture = AXCapture(pid: app.processIdentifier, names: names)
         measured = capture
         do {
             let windows = try capture.elements(application, kAXWindowsAttribute) ?? []

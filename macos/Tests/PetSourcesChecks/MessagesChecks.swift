@@ -116,6 +116,114 @@ func messagesChecks() -> [(String, () throws -> Void)] {
             let result = reader.poll(now: start.addingTimeInterval(1))
             try sourceCheck(result.events.map(\.text) == ["international variant"], "source filtering")
         }),
+        ("Messages excludes tapback additions and removals while allowing ordinary null and zero types", {
+            let f = try MessagesFixture(), start = Date().addingTimeInterval(-60)
+            try f.execute("ALTER TABLE message ADD COLUMN associated_message_type INTEGER")
+            let reader = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)
+            _ = reader.poll(now: start)
+            try f.add("ordinary null type", at: start.addingTimeInterval(0.1))
+            let plain = try f.add("ordinary zero type", at: start.addingTimeInterval(0.2))
+            let reaction = try f.add("synthetic reaction", at: start.addingTimeInterval(0.3))
+            let removal = try f.add("synthetic reaction removal", at: start.addingTimeInterval(0.4))
+            try f.execute("UPDATE message SET associated_message_type=0 WHERE ROWID=\(plain); UPDATE message SET associated_message_type=2000 WHERE ROWID=\(reaction); UPDATE message SET associated_message_type=3000 WHERE ROWID=\(removal)")
+            let received = reader.poll(now: start.addingTimeInterval(1)).events
+            try sourceCheck(received.map(\.text) == ["ordinary null type", "ordinary zero type"], "tapback became a message")
+            reader.acknowledge(Set(received.map(\.identity)))
+            try sourceCheck(reader.poll(now: start.addingTimeInterval(40)).events.isEmpty, "tapback became a delayed fallback")
+        }),
+        ("Messages removed watched rows stop blocking reads and leave no retry outbox entry", {
+            let f = try MessagesFixture(), start = Date().addingTimeInterval(-10)
+            let reader = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)
+            _ = reader.poll(now: start)
+            let removed = try f.add("synthetic removed message", at: start.addingTimeInterval(0.1))
+            let first = reader.poll(now: start.addingTimeInterval(1)).events[0]
+            let read = try f.add("synthetic read message", at: start.addingTimeInterval(1.1))
+            let second = reader.poll(now: start.addingTimeInterval(2)).events.last!
+            try f.add("synthetic still unread", at: start.addingTimeInterval(2.1))
+            let third = reader.poll(now: start.addingTimeInterval(3)).events.last!
+            try f.execute("DELETE FROM message WHERE ROWID=\(removed); UPDATE message SET is_read=1 WHERE ROWID=\(read)")
+            let result = reader.poll(now: start.addingTimeInterval(4))
+            let key = ConversationKey.local(.messages, identifier: f.phone)
+            try sourceCheck(key.isRead(observedAt: first.observedAt, in: result.reads), "deleted row blocked the read watermark")
+            try sourceCheck(key.isRead(observedAt: second.observedAt, in: result.reads), "later read row remained blocked")
+            try sourceCheck(!key.isRead(observedAt: third.observedAt, in: result.reads), "newer unread row was cleared")
+            try sourceCheck(result.events.map(\.identity) == [third.identity], "deleted row remained in the retry outbox")
+        }),
+        ("Messages deletion-only read resolution waits for older unread rows and survives cursor regression", {
+            for hasOlderUnread in [false, true] {
+                let f = try MessagesFixture(), start = Date().addingTimeInterval(-10)
+                let reader = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)
+                _ = reader.poll(now: start)
+                var older: Int64?
+                if hasOlderUnread {
+                    older = try f.add("synthetic older unread", at: start.addingTimeInterval(0.1))
+                    _ = reader.poll(now: start.addingTimeInterval(1))
+                }
+                let removed = try f.add("synthetic deleted newest row", at: start.addingTimeInterval(1.1))
+                let event = reader.poll(now: start.addingTimeInterval(2)).events.last!
+                try f.execute("DELETE FROM message WHERE ROWID=\(removed)")
+                let deleted = reader.poll(now: start.addingTimeInterval(3))
+                if let older {
+                    try sourceCheck(deleted.reads.isEmpty, "deletion cleared an older unread message")
+                    try f.execute("UPDATE message SET is_read=1 WHERE ROWID=\(older)")
+                }
+                let resolved = reader.poll(now: start.addingTimeInterval(4))
+                try sourceCheck(event.conversation.isRead(observedAt: event.observedAt, in: resolved.reads), "deleted newest row never advanced reads")
+                try sourceCheck(resolved.events.isEmpty, "deleted newest row remained queued")
+            }
+        }),
+        ("Messages waiting bodies survive deletion of a later highest ROWID", {
+            let f = try MessagesFixture(), start = Date().addingTimeInterval(-60)
+            let reader = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)
+            _ = reader.poll(now: start)
+            try f.add(at: start.addingTimeInterval(0.1))
+            _ = reader.poll(now: start.addingTimeInterval(1))
+            let later = try f.add("synthetic later deleted row", at: start.addingTimeInterval(1.1))
+            let received = reader.poll(now: start.addingTimeInterval(2)).events
+            reader.acknowledge(Set(received.map(\.identity)))
+            try f.execute("DELETE FROM message WHERE ROWID=\(later)")
+            try sourceCheck(reader.poll(now: start.addingTimeInterval(3)).reads.isEmpty, "deletion erased a pending earlier body")
+            let fallback = reader.poll(now: start.addingTimeInterval(31.1)).events
+            try sourceCheck(fallback.map(\.text) == ["(메시지)"], "cursor regression discarded the waiting body")
+        }),
+        ("Messages missing and undecodable bodies fall back after thirty seconds with stable retries", {
+            let f = try MessagesFixture(), start = Date().addingTimeInterval(-60)
+            let reader = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)
+            _ = reader.poll(now: start)
+            let missing = try f.add(at: start.addingTimeInterval(0.1))
+            let corrupt = try f.add(body: Data("synthetic invalid archive".utf8), at: start.addingTimeInterval(0.2))
+            try sourceCheck(reader.poll(now: start.addingTimeInterval(1)).events.isEmpty)
+            try sourceCheck(reader.poll(now: start.addingTimeInterval(30.9)).events.isEmpty, "body fallback was premature")
+            let fallback = reader.poll(now: start.addingTimeInterval(31.1)).events
+            try sourceCheck(fallback.count == 2 && fallback.allSatisfy { $0.text == "(메시지)" }, "unresolved body disappeared without a fallback")
+            try sourceCheck(fallback.allSatisfy { abs(PetEvent.date($0.observedAt)!.timeIntervalSince(start.addingTimeInterval(1))) < 0.002 }, "fallback lost first observation")
+            try sourceCheck(reader.poll(now: start.addingTimeInterval(32)).events.map(\.identity) == fallback.map(\.identity), "fallback retry identity changed")
+            reader.acknowledge(Set(fallback.map(\.identity)))
+            try f.hydrate(missing, body: NSArchiver.archivedData(withRootObject: NSAttributedString(string: "synthetic late hydration")))
+            try sourceCheck(reader.poll(now: start.addingTimeInterval(33)).events.isEmpty, "late hydration replayed a fallback")
+            try f.execute("UPDATE message SET is_read=1 WHERE ROWID IN (\(missing),\(corrupt))")
+            let read = reader.poll(now: start.addingTimeInterval(34)).reads
+            try sourceCheck(fallback.allSatisfy { $0.conversation.isRead(observedAt: $0.observedAt, in: read) }, "fallback lost read tracking")
+        }),
+        ("Messages queued body fallbacks restore read tracking after restart and late hydration", {
+            let f = try MessagesFixture(), start = Date().addingTimeInterval(-60)
+            let queue = EventQueue(paths: PetPaths(root: f.directory.appendingPathComponent("queue")))
+            let original = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)
+            _ = original.poll(now: start)
+            let id = try f.add(at: start.addingTimeInterval(0.1))
+            _ = original.poll(now: start.addingTimeInterval(1))
+            let fallback = original.poll(now: start.addingTimeInterval(32)).events
+            try sourceCheck(fallback.count == 1 && fallback[0].text == "(메시지)", "fallback missing before restart")
+            try queue.enqueue(fallback[0])
+            original.acknowledge([fallback[0].identity])
+            try f.hydrate(id, body: NSArchiver.archivedData(withRootObject: NSAttributedString(string: "synthetic hydrated after fallback")))
+            try f.execute("UPDATE message SET is_read=1 WHERE ROWID=\(id)")
+            let restarted = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)
+            restarted.restorePending(try queue.pending())
+            let result = restarted.poll(now: start.addingTimeInterval(33))
+            for (key, at) in result.reads { try queue.markRead(key, at: at) }
+            try sourceCheck(result.events.isEmpty && (try queue.count()) == 0, "queued fallback was not reconnected to its original row")
+        }),
         ("Messages decodes bounded text, secure keyed and legacy typedstream bodies", {
             let f = try MessagesFixture(), start = Date().addingTimeInterval(-5)
             let reader = MessagesReader(handle: f.phone, databaseURL: f.databaseURL)

@@ -10,6 +10,25 @@ public final class ContactReaders: LocalSourceReader {
     }
     private let entries: [Entry]
     private let ambiguousSelection: Bool
+    private var kakaoInputs: KakaoSharedInputs?
+
+    /// Construct the Kakao readers together so their expensive inputs can be shared within each poll.
+    public static func kakao(identifiers: [String], reusing previous: ContactReaders? = nil,
+                             databaseURL: URL = KakaoNotificationReader.defaultDatabaseURL,
+                             fallbackGrace: TimeInterval = 1,
+                             capture: (([String]) -> KakaoCapture)? = nil,
+                             databaseSessionOpened: (() -> Void)? = nil) -> ContactReaders {
+        let reusable = previous?.kakaoInputs != nil ? previous : nil
+        let inputs = reusable?.kakaoInputs ?? KakaoSharedInputs(databaseURL: databaseURL, capture: capture, opened: databaseSessionOpened)
+        let readers = ContactReaders(source: .kakao, identifiers: identifiers, reusing: reusable) { name in
+            KakaoCombinedReader(name: name,
+                axReader: KakaoReader(name: name, capture: { inputs.snapshot() }),
+                notificationReader: KakaoNotificationReader(name: name, database: inputs.database),
+                fallbackGrace: fallbackGrace)
+        }
+        readers.kakaoInputs = inputs
+        return readers
+    }
 
     public init(source: PetSource, identifiers: [String], reusing previous: ContactReaders? = nil,
                 makeReader: (String) -> LocalSourceReader) {
@@ -39,6 +58,8 @@ public final class ContactReaders: LocalSourceReader {
 
     public func poll(now: Date) -> SourcePoll {
         guard !ambiguousSelection else { return SourcePoll(status: .unavailable) }
+        kakaoInputs?.beginPoll(names: entries.map(\.identifier))
+        defer { kakaoInputs?.endPoll() }
         var events: [PetEvent] = [], reads: [ConversationKey: Date] = [:], statuses: [SourceStatus] = []
         for entry in entries {
             let batch = entry.reader.poll(now: now)
@@ -87,5 +108,34 @@ public final class ContactReaders: LocalSourceReader {
             return status
         }
         return .disabled
+    }
+}
+
+/// Scoped by ContactReaders.poll, never by wall-clock time: consecutive polls may share the same Date.
+/// Only input snapshots are shared. Every child keeps its own baseline, retries and read state.
+private final class KakaoSharedInputs {
+    let database: KakaoNotificationDatabase
+    private let capture: ([String]) -> KakaoCapture
+    private var names: [String] = []
+    private var captured: KakaoCapture?
+
+    init(databaseURL: URL, capture: (([String]) -> KakaoCapture)?, opened: (() -> Void)?) {
+        database = KakaoNotificationDatabase(url: databaseURL, opened: opened)
+        self.capture = capture ?? { KakaoReader.systemCapture(names: $0) }
+    }
+
+    func beginPoll(names: [String]) {
+        self.names = names; captured = nil
+        database.beginPoll()
+    }
+    func endPoll() {
+        captured = nil; names = []
+        database.endPoll()
+    }
+    func snapshot() -> KakaoCapture {
+        if let captured { return captured }
+        let result = capture(names)
+        captured = result
+        return result
     }
 }

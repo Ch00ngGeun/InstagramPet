@@ -7,10 +7,15 @@
     const settings = C.settings(value);
     return [settings.enabled, settings.allowedSenders, settings.bindings];
   };
-  function dropObsoletePending(data, desired, changes) {
+  function dropObsoletePending(data, desired, changes, now) {
     if (equal(selection(data.settings), selection(desired))) return;
-    if (Array.isArray(data.pending) && data.pending.some(item => item?.event?.kind !== "test"))
-      changes.pending = data.pending.filter(item => item?.event?.kind === "test");
+    const allowed = C.settings(desired).allowedSenders;
+    if (!allowed.length || !Array.isArray(data.pending)) return;
+    const pending = data.pending.filter(item => item?.event?.kind === "test" || allowed.includes(item?.event?.sender));
+    if (pending.length !== data.pending.length) {
+      changes.pending = pending;
+      changes.lastDrop = { reason: "selection-changed", at: now };
+    }
   }
 
   function instagram(value) {
@@ -80,7 +85,7 @@
           // If this write fails, the active selection is never touched.
           if (app !== null && !data.manualSettings) await this.set({ manualSettings: manual });
           if (!equal(data.settings, desired)) changes.settings = desired;
-          dropObsoletePending(data, desired, changes);
+          dropObsoletePending(data, desired, changes, this.now());
           if (!own(data, "appInstagram") || !equal(data.appInstagram, app)) changes.appInstagram = app;
           const state = app === null ? "manual" : "managed";
           if (data.appConfigSync?.state !== state || own(changes, "settings") || own(changes, "appInstagram"))
@@ -108,7 +113,7 @@
           const manual = validateManual(raw), desired = effective(manual, app), changes = {};
           if (!equal(data.manualSettings, manual)) changes.manualSettings = manual;
           if (!equal(data.settings, desired)) changes.settings = desired;
-          dropObsoletePending(data, desired, changes);
+          dropObsoletePending(data, desired, changes, this.now());
           if (Object.keys(changes).length) await this.set(changes);
           return { ok: true, ...summary(data) };
         } catch { return { ok: false, error: "Manual settings could not be saved" }; }

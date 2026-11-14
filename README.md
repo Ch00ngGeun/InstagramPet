@@ -211,7 +211,7 @@ Swift 검사는 전체 Xcode의 XCTest가 없는 Command Line Tools 환경에서
 "$HOME/Library/Application Support/InstagramPet/bin/PetNativeHost" --clear
 ```
 
-확장 대기 큐는 최대 100개/5분, Swift 대기 큐는 최대 200개/24시간입니다. 만료 파일의 실제 삭제는 다음 큐 접근 때 이뤄집니다. 펫은 표시한 이벤트 파일을 지우고, 중복 확인용 내용 없는 기록만 제한적으로 보관합니다. 자세한 데이터 위치와 한계는 [SECURITY.md](docs/SECURITY.md)를 참고하세요.
+확장 대기 큐는 최대 100개/24시간, Swift 대기 큐는 최대 200개/24시간입니다. 만료 파일의 실제 삭제는 다음 큐 접근 때 이뤄집니다. 펫은 표시한 이벤트 파일을 지우고, 중복 확인용 내용 없는 기록만 제한적으로 보관합니다. 자세한 데이터 위치와 한계는 [SECURITY.md](docs/SECURITY.md)를 참고하세요.
 
 ## 제거
 

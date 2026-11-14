@@ -22,6 +22,8 @@ python3 scripts/test-app.py
 
 확장 프로그램 테스트는 파싱과 감지 상태를 확인하고, `PetCoreChecks`는 Foundation만 사용하는 실행형 검사로 이벤트 검증·로컬 큐·중복 처리를 확인합니다. 전체 Xcode의 XCTest 모듈 없이 Apple Command Line Tools로 실행할 수 있도록 구성했습니다. 앱을 빌드한 뒤 프로젝트 루트에서 `./scripts/test-native.py`로 Native Messaging 프레임 통합 검사도 실행합니다. 빌드 명령은 루트 README를 따릅니다. 테스트 결과를 보고할 때 실행한 명령, 종료 코드, 실제 테스트 수를 함께 기록합니다.
 
+말풍선 모퉁이 회귀만 실행하려면 `python3 scripts/test-app.py AppPipelineTest.test_tucked_bubbles_settle_at_every_corner_without_hidden_pet_distortion`을 사용합니다. 실제 애니메이션으로 네 모퉁이에서 일반·장문 메시지 12개를 연속 추가하며, 합성 렌더 PNG 8개와 수치 보고서를 `work/bubble-geometry/`에 보존합니다.
+
 최소 회귀 사례:
 
 | 입력 / 조작 | 기대 결과 |
