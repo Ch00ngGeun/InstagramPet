@@ -70,7 +70,11 @@ func launchPetIfConfigured() {
 // Ignore broken pipe so a Chrome disconnect exits cleanly instead of a crash report.
 signal(SIGPIPE, SIG_IGN)
 do {
-    while let payload = try NativeFrame.read(from: .standardInput) {
+    // A command-line loop has no run loop draining autoreleased Foundation objects, so each request,
+    // including the stdin reads, runs in its own pool. Without it the host kept two 8KB read buffers per
+    // message: 1.4GB after 5 days of 5-second config syncs.
+    while try autoreleasepool(invoking: { () throws -> Bool in
+        guard let payload = try NativeFrame.read(from: .standardInput) else { return false }
         do {
             guard let request = try JSONSerialization.jsonObject(with: payload) as? [String: Any],
                   let version = request["version"] as? Int, version == 1,
@@ -106,7 +110,8 @@ do {
             try response(["version": 1, "type": "error", "ok": false, "error": reason])
             diagnostic(reason)
         }
-    }
+        return true
+    }) {}
 } catch {
     // A malformed/truncated frame loses stream alignment; close the port instead of guessing.
     diagnostic("framing/connection closed")

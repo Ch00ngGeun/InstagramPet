@@ -159,6 +159,29 @@ class NativeBridgeTests(unittest.TestCase):
         finally:
             if process.poll() is None: process.kill(); process.communicate(timeout=5)
 
+    def test_long_connection_memory_stays_flat(self):
+        # Chrome keeps one connection open for days and syncs config every 5 s; the host once kept
+        # two 8KB read buffers per request (1.4GB after 5 days).
+        import re
+        process = subprocess.Popen([str(HOST), ORIGIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env=self.env)
+        def footprint():
+            out = subprocess.run(['vmmap', '--summary', str(process.pid)], capture_output=True, text=True).stdout
+            number, unit = re.search(r'Physical footprint:\s+([\d.]+)([KMG])', out).groups()
+            return float(number) * {'K': 1 / 1024, 'M': 1, 'G': 1024}[unit]
+        def requests(count):
+            for _ in range(count):
+                process.stdin.write(frame({'version': 1, 'type': 'ping'})); process.stdin.flush()
+                process.stdout.read(struct.unpack('=I', process.stdout.read(4))[0])
+        try:
+            requests(500)
+            before = footprint()
+            requests(3000)
+            # Leaking build: +47MB over these 3000 requests.
+            self.assertLess(footprint() - before, 5)
+        finally:
+            process.kill(); process.communicate(timeout=5)
+
     def test_config_requires_the_registered_extension_origin(self):
         (self.root / 'sources.json').write_text(json.dumps({'instagram': {'username': 'fixture.friend', 'threadId': '123'}}))
         for origin in ('chrome-extension://' + 'b' * 32 + '/', ORIGIN + '?other', None):
