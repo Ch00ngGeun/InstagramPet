@@ -2,7 +2,7 @@ import AppKit
 import PetCore
 import PetSources
 
-/// Up to five bubbles orbiting the pet: newest on the right, then above the head, left, lower right, lower left.
+/// 펫 주위의 메시지 말풍선들(앱당 4개, 모두 12개까지): Orbit으로 자리를 정하고, 매 틱 스프링과 충돌을 처리한다.
 final class BubbleField: NSView {
     private var views: [String: BubbleView] = [:]
     private var order: [PetEvent] = []
@@ -11,7 +11,7 @@ final class BubbleField: NSView {
     var onClick: ((PetEvent) -> Void)?
     var contextMenu: NSMenu?
 
-    /// `events` is oldest first; the last one is the current message.
+    /// `events`는 오래된 순이며, 마지막이 현재 메시지다.
     func show(_ events: [PetEvent]) {
         order = Orbit.capped(events)
         let ids = Set(order.map(\.identity))
@@ -27,9 +27,9 @@ final class BubbleField: NSView {
         isHidden = false
     }
 
-    /// Re-solve only when the pet, the screen or the messages change; spring every tick.
-    /// `petIsSolid` false: the pet is tucked or hidden, so its old spot must not shove or flatten bubbles
-    /// (they kept fighting their goal there and stayed stretched into broken slivers at corners).
+    /// 펫·화면·메시지가 바뀔 때만 자리를 다시 계산하고, 스프링은 매 틱 움직인다.
+    /// `petIsSolid`가 false면 펫이 집어넣어졌거나 숨겨진 것이므로, 예전 자리가 말풍선을 밀거나 납작하게 만들면 안 된다
+    /// (그러면 말풍선이 그 자리에서 목표와 계속 다투다가 모서리에서 부서진 조각처럼 늘어난 채로 남았다).
     func update(pet: NSRect, area: NSRect, animated: Bool, petIsSolid: Bool = true) {
         let key = "\(pet.integral)|\(area)|\(order.map(\.identity))|\(String(describing: Orbit.tuckAnchor))"
         if key != solvedKey {
@@ -44,13 +44,13 @@ final class BubbleField: NSView {
                 if view.shape != spot.shape { view.shape = spot.shape }
             }
         }
-        // Walls: the screen edges, and between neighbours a line where their bodies would meet.
+        // 벽: 화면 가장자리, 그리고 이웃끼리는 두 몸이 맞닿을 선.
         let edges = [Wall(point: NSPoint(x: area.minX, y: 0), normal: NSPoint(x: -1, y: 0)), Wall(point: NSPoint(x: area.maxX, y: 0), normal: NSPoint(x: 1, y: 0)),
                      Wall(point: NSPoint(x: 0, y: area.minY), normal: NSPoint(x: 0, y: -1)), Wall(point: NSPoint(x: 0, y: area.maxY), normal: NSPoint(x: 0, y: 1))]
-        // Resolve collisions in arrival order: dictionary order can trap a reflowing row behind its neighbours.
+        // 충돌은 도착 순서대로 푼다. 딕셔너리 순서면 다시 흐르는 줄이 이웃 뒤에 갇힐 수 있다.
         let all = order.compactMap { views[$0.identity] }
         for view in all { view.step(animated: animated) }
-        // Solid bodies: a fast pet shoves bubbles along instead of passing through, and bubbles shove each other.
+        // 단단한 몸: 빠르게 움직이는 펫은 말풍선을 통과하지 않고 밀어내며, 말풍선끼리도 서로 민다.
         if animated {
             let solid = pet.insetBy(dx: 10, dy: 6)
             for _ in 0..<3 {
@@ -72,9 +72,9 @@ final class BubbleField: NSView {
             let mine = view.footprintNow, c = NSPoint(x: mine.midX, y: mine.midY)
             for other in all where other !== view {
                 let theirs = other.footprintNow
-                // Contact faces are always straight and axis-aligned (vertical between side-by-side bubbles,
-                // horizontal between stacked ones), midway between the two edges, even when the neighbours are
-                // offset or differ in size: a slanted face made the outlines ripple and leave ragged gaps.
+                // 맞닿는 면은 늘 곧고 축에 나란하며(나란히 놓이면 세로, 쌓이면 가로), 두 가장자리의 한가운데에 있다.
+                // 이웃이 어긋나 있거나 크기가 달라도 마찬가지다. 비스듬한 면은 외곽선을 출렁이게 하고
+                // 들쭉날쭉한 틈을 남겼다.
                 let overlapX = min(mine.maxX, theirs.maxX) - max(mine.minX, theirs.minX)
                 let overlapY = min(mine.maxY, theirs.maxY) - max(mine.minY, theirs.minY)
                 let gapX = max(theirs.minX - mine.maxX, mine.minX - theirs.maxX), gapY = max(theirs.minY - mine.maxY, mine.minY - theirs.maxY)
@@ -89,12 +89,12 @@ final class BubbleField: NSView {
                     n = NSPoint(x: 0, y: up ? 1 : -1)
                     point = NSPoint(x: c.x, y: up ? (mine.maxY + theirs.minY) / 2 : (mine.minY + theirs.maxY) / 2)
                 }
-                // The neighbour's drawn ellipse: body (footprint minus tailRoom) grown by the bulge.
+                // 이웃이 그려지는 타원: 몸(footprint에서 tailRoom을 뺀 것)을 bulge만큼 키운 것.
                 let body = theirs.insetBy(dx: BubbleView.tailRoom, dy: BubbleView.tailRoom)
                 let zone = body.insetBy(dx: -body.width * (BubbleView.bulge - 1) / 2, dy: -body.height * (BubbleView.bulge - 1) / 2)
                 walls.append(Wall(point: point, normal: n, zone: zone))
             }
-            // The pet is a wall too: a stretched or squashed blob flattens against it instead of overlapping it.
+            // 펫도 벽이다: 늘어나거나 찌그러진 말풍선은 펫과 겹치지 않고 펫에 대고 납작해진다.
             let solid = pet.insetBy(dx: 10, dy: 6)
             let gapX = max(solid.minX - mine.maxX, mine.minX - solid.maxX), gapY = max(solid.minY - mine.maxY, mine.minY - solid.maxY)
             let zone = solid.insetBy(dx: -solid.width * 0.25, dy: -solid.height * 0.25)
@@ -111,7 +111,7 @@ final class BubbleField: NSView {
         }
     }
 
-    /// Smallest move that takes `a` out of `b`, or nil when they don't overlap.
+    /// `a`를 `b` 밖으로 꺼내는 가장 작은 이동. 겹치지 않으면 nil.
     static func separation(_ a: NSRect, from b: NSRect) -> NSPoint? {
         guard a.intersects(b) else { return nil }
         let options = [NSPoint(x: b.minX - a.maxX, y: 0), NSPoint(x: b.maxX - a.minX, y: 0), NSPoint(x: 0, y: b.minY - a.maxY), NSPoint(x: 0, y: b.maxY - a.minY)]

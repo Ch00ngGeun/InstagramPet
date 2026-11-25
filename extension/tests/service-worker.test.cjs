@@ -1,3 +1,5 @@
+// 서비스 워커 메시지 처리 검사: 보낸 쪽 신뢰 확인, 콘텐츠와 UI가 각각 보낼 수 있는 요청,
+// 확인 응답 전 저장, 읽음 표시 범위, 다시 불러올 때 콘텐츠 스크립트 재주입.
 const { test }=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
@@ -49,6 +51,6 @@ test('read marks only come from the thread tab itself and are forwarded to the h
   const w=worker(),thread='https://www.instagram.com/direct/t/123/';
   for(const [threadUrl,url] of [[thread,'https://www.instagram.com/direct/inbox/'],[thread,'https://www.instagram.com/direct/t/999/'],['https://evil.example/direct/t/123/',thread]])
     assert.match((await w.send({type:'pet.read',threadUrl},sender({url}))).error,/own thread page/);
-  // Validation passed: the request reaches the (unavailable) native host.
+  // 검증 통과: 요청이 (연결 불가인) 네이티브 호스트까지 간다.
   assert.match((await w.send({type:'pet.read',threadUrl:thread},sender({url:thread}))).error,/Native host unavailable/);
 });

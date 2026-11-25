@@ -1,3 +1,5 @@
+// 옵션 페이지: 브리지·앱 설정 상태와 진단을 보여 주고, 수동 설정을 저장하며,
+// 서비스 워커를 통해 확인/테스트/비우기 동작을 실행한다.
 (() => {
   "use strict";
   const $ = id => document.getElementById(id), C = PetCommon;
@@ -59,7 +61,7 @@
       if (!selectors || Array.isArray(selectors) || typeof selectors !== "object") throw new Error("Selectors must be a JSON object");
       for (const [key, value] of Object.entries(selectors)) {
         if (!C.SELECTOR_KEYS.has(key) || typeof value !== "string" || value.length > 400) throw new Error(`Invalid selector setting: ${key}`);
-        document.querySelector(value); // Syntax validation only; does not promise compatibility.
+        document.querySelector(value); // 문법만 검사한다. 실제 화면과 맞는지는 보장하지 않는다.
       }
       const result = await request("pet.settings.save", { settings: C.settings({ enabled: $("enabled").checked, allowedSenders, bindings, selectors, debug: $("debug").checked }) });
       if (!result.ok) throw new Error("Settings could not be saved");

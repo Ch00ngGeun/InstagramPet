@@ -2,6 +2,8 @@ import AppKit
 import PetCore
 import PetSources
 
+// 말풍선을 누르면 해당 대화를 Chrome·메시지·카카오톡에서 열고 읽음 처리한다.
+
 extension PetController {
     func openURLInChrome(_ url: URL) {
         if let chrome = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") {

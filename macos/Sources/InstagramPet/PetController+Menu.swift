@@ -2,6 +2,8 @@ import AppKit
 import PetCore
 import PetSources
 
+// 메뉴 막대·우클릭 메뉴 구성과 캐릭터 고르기·추가·삭제.
+
 extension PetController {
     func item(_ title: String, action: Selector? = nil, key: String = "") -> NSMenuItem {
         let result = NSMenuItem(title: title, action: action, keyEquivalent: key)
@@ -53,7 +55,7 @@ extension PetController {
         updateStatus()
     }
 
-    // Characters: PNGs the user added, kept in the local data folder; the chosen file name lives in defaults.
+    // 캐릭터: 사용자가 추가한 PNG는 로컬 데이터 폴더에, 고른 파일 이름은 defaults에 둔다.
     private var charactersFolder: URL { paths.root.appendingPathComponent("characters", isDirectory: true) }
     private var chosenCharacter: String? {
         get { UserDefaults.standard.string(forKey: "pet.character") }
@@ -61,7 +63,7 @@ extension PetController {
     }
 
     private func applyCharacter() {
-        // A missing or unreadable file falls back to the bundled pet.
+        // 없거나 읽을 수 없는 파일이면 번들 펫으로 돌아간다.
         let custom = chosenCharacter.flatMap { NSImage(contentsOf: charactersFolder.appendingPathComponent($0)) }
         if custom == nil { chosenCharacter = nil }
         cat.sprite = custom ?? Bundle.main.image(forResource: "pet")
@@ -117,8 +119,8 @@ extension PetController {
         applyCharacter()
     }
 
-    /// Copies any image as a PNG no taller than twice the drawn height (keeps the per-pixel scan quick),
-    /// named after the source file, with " 2", " 3"… on a clash. Returns the saved file name.
+    /// 어떤 그림이든 그려지는 높이의 2배 이하 PNG로 복사한다(픽셀 단위 검사를 빠르게 유지).
+    /// 이름은 원본 파일을 따르고, 겹치면 " 2", " 3"…을 붙인다. 저장한 파일 이름을 돌려준다.
     static func saveCharacter(from source: URL, into folder: URL) throws -> String {
         guard let image = NSImage(contentsOf: source), image.size.width > 0, image.size.height > 0 else {
             throw PetError.invalid("그림 파일을 읽지 못했습니다.")

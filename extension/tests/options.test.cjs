@@ -1,3 +1,4 @@
+// 옵션 페이지 검사: 앱 설정 우선 안내, 수동 값 보존, 입력 검증.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path');
@@ -67,6 +68,6 @@ test('options notice explains that an explicitly blank app selection disables In
   try {
     await f.drain(); assert.match(f.$('appConfigNotice').textContent, /disabled by the pet app/);
     assert.equal(f.data.settings.enabled, false);
-    assert.equal(f.$('enabled').checked, true); // The manual global pause value is preserved.
+    assert.equal(f.$('enabled').checked, true); // 수동 전체 일시정지 값은 보존된다.
   } finally { f.dom.window.close(); }
 });

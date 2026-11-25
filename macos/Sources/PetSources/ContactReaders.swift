@@ -1,7 +1,10 @@
 import Foundation
 import PetCore
 
-/// A source can observe several selected contacts while retaining each contact's own baseline and outbox.
+// 소스의 선택된 연락처마다 리더를 하나씩 돌리고 폴링 결과를 합친다. KakaoTalk 리더들은
+// 폴링마다 손쉬운 사용(AX) 캡처 하나와 알림 DB 세션 하나를 함께 쓴다.
+
+/// 한 소스가 여러 연락처를 지켜보면서도 연락처마다 자기 기준선과 outbox를 따로 유지한다.
 public final class ContactReaders: LocalSourceReader {
     public let source: PetSource
     private struct Entry {
@@ -12,7 +15,7 @@ public final class ContactReaders: LocalSourceReader {
     private let ambiguousSelection: Bool
     private var kakaoInputs: KakaoSharedInputs?
 
-    /// Construct the Kakao readers together so their expensive inputs can be shared within each poll.
+    /// Kakao 리더들을 함께 만들어서 비싼 입력을 폴링마다 공유할 수 있게 한다.
     public static func kakao(identifiers: [String], reusing previous: ContactReaders? = nil,
                              databaseURL: URL = KakaoNotificationReader.defaultDatabaseURL,
                              fallbackGrace: TimeInterval = 1,
@@ -40,7 +43,7 @@ public final class ContactReaders: LocalSourceReader {
         var selected = Set<String>(), entries: [Entry] = []
         for identifier in identifiers where !identifier.isEmpty && selected.insert(identifier).inserted {
             let reader = reusable[identifier] ?? makeReader(identifier)
-            // The factory is local code; a mismatched source still must not cross the source boundary.
+            // 팩토리는 로컬 코드지만, 소스가 맞지 않으면 여전히 소스 경계를 넘으면 안 된다.
             guard reader.source == source else { continue }
             entries.append(Entry(identifier: identifier, reader: reader))
         }
@@ -92,7 +95,7 @@ public final class ContactReaders: LocalSourceReader {
         return Self.aggregate(entries.compactMap { ($0.reader as? KakaoCombinedReader)?.notificationStatus })
     }
 
-    /// Emoji suffixes are optional for a single selection, so two aliases must not observe the same chat twice.
+    /// 이모지 접미사는 있어도 없어도 맞으므로, 두 별칭이 같은 채팅을 두 번 지켜보면 안 된다.
     public static func hasAmbiguousKakaoNames(_ names: [String]) -> Bool {
         for first in names.indices {
             for second in names.indices where second > first {
@@ -111,8 +114,8 @@ public final class ContactReaders: LocalSourceReader {
     }
 }
 
-/// Scoped by ContactReaders.poll, never by wall-clock time: consecutive polls may share the same Date.
-/// Only input snapshots are shared. Every child keeps its own baseline, retries and read state.
+/// 범위는 실제 시각이 아니라 ContactReaders.poll 호출 단위다. 연속된 폴링이 같은 Date를 가질 수 있다.
+/// 공유하는 것은 입력 스냅숏뿐이다. 각 하위 리더는 자기 기준선, 재시도, 읽음 상태를 따로 가진다.
 private final class KakaoSharedInputs {
     let database: KakaoNotificationDatabase
     private let capture: ([String]) -> KakaoCapture

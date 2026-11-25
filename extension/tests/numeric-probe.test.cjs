@@ -1,3 +1,5 @@
+// 옵션 페이지 숫자 프로브 검사: 개수만 돌려주고, 요청할 때만 다시 불러오며,
+// 실패 시 고정된 숫자 오류를 낸다.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');

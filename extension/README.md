@@ -2,7 +2,7 @@
 
 Load this directory as an **unpacked** extension in Google Chrome (`chrome://extensions`, Developer mode, Load unpacked). No JavaScript build is needed. See the project README for the Swift build and Native Messaging registration.
 
-Open the extension's settings from its toolbar icon. Add the exact allowed Instagram username. Keep a logged-in `https://www.instagram.com/direct/inbox/` or `/direct/t/THREAD_ID/` tab open. After loading/reloading the extension, reload any already-open Instagram tabs. The content script is installed on Instagram only so it can follow Instagram's single-page navigation; it does not read other websites.
+Open the extension's settings from its toolbar icon. Add the exact allowed Instagram username. Keep a logged-in `/direct/t/THREAD_ID/` tab open for each watched account. When a thread ID is bound to the username, the extension keeps that thread pinned and reopens it in the background within a minute if it is missing. After loading/reloading the extension, reload any already-open Instagram tabs. The content script is installed on Instagram only so it can follow Instagram's single-page navigation; it does not read other websites.
 
 Instagram does not expose a stable public web DOM contract. **The default adapter is conservative and may require calibration in your account's layout.** This source has been tested with illustrative HTML fixtures, not a logged-in live Instagram account. Do not interpret “Observing” or a successful bridge test as proof of live DM detection.
 

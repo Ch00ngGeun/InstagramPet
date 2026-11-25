@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Framed native event -> actual AppKit poll/present/consume, offscreen in a logged-in Mac session."""
+"""빌드된 앱의 --smoke-* 모드를 실행한다: 네이티브 이벤트 -> AppKit 말풍선, 전달 지연, 배치, 설정.
+
+실행: build-app.sh 후, 로그인된 Mac 데스크톱 세션에서 python3 scripts/test-app.py
+"""
 import datetime
 import json
 import os
@@ -45,7 +48,7 @@ class AppPipelineTest(unittest.TestCase):
                                  env=dict(os.environ, INSTAGRAMPET_HOME=folder), capture_output=True, timeout=30)
             self.assertEqual(app.returncode, 0, app.stderr)
             result = json.loads(report.read_text())
-            # Synthetic desktop previews remain available for visual QA after the temporary home is removed.
+            # 임시 홈이 지워진 뒤에도 눈으로 확인(QA)할 수 있도록 합성 데스크톱 미리보기를 남겨 둔다.
             shutil.copytree(folder, PROJECT / 'work/bubble-geometry', dirs_exist_ok=True)
             self.assertTrue(result['ok'], result)
             self.assertEqual(result['cases'], 8)
@@ -76,7 +79,7 @@ class AppPipelineTest(unittest.TestCase):
                                   capture_output=True, timeout=45)
         self.assertEqual(measured.returncode, 0, 'synthetic burst measurement failed')
         samples = json.loads(measured.stdout)
-        self.assertEqual([row[0] for row in samples], [1, 2, 3, 4, 4])  # one app keeps at most four
+        self.assertEqual([row[0] for row in samples], [1, 2, 3, 4, 4])  # 앱 하나당 최대 4개까지만 유지
         self.assertLess(max(row[1] for row in samples), 3000, samples)
 
     def test_notification_wal_burst_reaches_five_bubbles_within_three_seconds(self):
@@ -86,7 +89,7 @@ class AppPipelineTest(unittest.TestCase):
         ], capture_output=True, timeout=45)
         self.assertEqual(measured.returncode, 0, 'synthetic notification measurement failed')
         samples = json.loads(measured.stdout)
-        self.assertEqual([row[0] for row in samples], [1, 2, 3, 4, 4])  # one app keeps at most four
+        self.assertEqual([row[0] for row in samples], [1, 2, 3, 4, 4])  # 앱 하나당 최대 4개까지만 유지
         self.assertTrue(all(row[1] >= 0 for row in samples), samples)
         self.assertLess(max(row[1] for row in samples), 3000, samples)
 

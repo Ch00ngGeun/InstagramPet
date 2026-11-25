@@ -3,6 +3,9 @@ import SQLite3
 import PetCore
 import PetSources
 
+// KakaoTalk 알림 읽기와 통합 리더 검사: 폴링마다 공유하는 입력, 알림 수정,
+// outbox 한도, DB 교체, 알림과 AX 미리보기의 짝짓기.
+
 private final class NotificationFixture {
     let directory: URL
     var databaseURL: URL { directory.appendingPathComponent("notifications.db") }

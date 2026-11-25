@@ -1,3 +1,5 @@
+/* 워커 쪽 전달 대기열: DM 이벤트를 검증하고 중복을 거른 뒤 저장소에 보관하며,
+   네이티브 호스트가 확인 응답할 때까지 하나씩 넘긴다. */
 (function (root) {
   "use strict";
   const C = root.PetCommon || require("./common.js");
@@ -40,7 +42,7 @@
       const pending = stored.filter(x => {
         if (!x?.event || !Number.isFinite(x.savedAt)) return false;
         if (now - x.savedAt > PENDING_TTL) { dropReason = "expired"; return false; }
-        // An empty selection can be transient during app/manual synchronization. Pause, retain, and expire normally.
+        // 빈 선택은 앱/수동 동기화 중 잠깐 생길 수 있다. 전송을 멈추고 보관하다가 평소대로 만료시킨다.
         if (x.event.kind !== "test" && cfg.allowedSenders.length && !cfg.allowedSenders.includes(x.event.sender)) {
           dropReason ||= "selection-changed"; return false;
         }
@@ -57,7 +59,7 @@
         const event = validateEvent(raw, state.config.allowedSenders, allowTest, this.now());
         if (state.seen.some(x => x.id === event.eventId || sameContent(x, event)) || state.pending.some(x =>
           x.event.eventId === event.eventId || (x.event.kind !== "test" && sameContent({ fingerprint: fingerprint(x.event), observedAt: Date.parse(x.event.observedAt) }, event)))) return { ok: true, duplicate: true };
-        // Drop oldest by explicit bounded local policy; expose a counter to the user.
+        // 크기 제한 대기열: 가장 오래된 것을 버리고 사용자가 볼 수 있게 lastDrop "queue-full"을 기록한다.
         const overflow = state.pending.length >= MAX_PENDING;
         state.pending.push({ event, savedAt: this.now() });
         state.pending = state.pending.slice(-MAX_PENDING);

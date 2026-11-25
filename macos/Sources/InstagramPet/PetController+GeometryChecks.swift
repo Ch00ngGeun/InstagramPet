@@ -2,10 +2,10 @@ import AppKit
 import PetCore
 import PetSources
 
-extension PetController {
-    // MARK: Previews
+// 화면 밖 자체 점검: 설정 폼 저장 경로, 펫 찌그러짐 기하, 집어넣은 펫 옆 말풍선 배치(--smoke-* 플래그).
 
-    /// The form and real asynchronous save/apply path, using only an isolated private home and fake contacts.
+extension PetController {
+    /// 폼과 실제 비동기 저장·적용 경로를 점검한다. 격리된 비공개 홈과 가짜 연락처만 쓴다.
     func checkSettings(to output: URL) {
         guard ProcessInfo.processInfo.environment["INSTAGRAMPET_HOME"] != nil,
               paths.root.resolvingSymlinksInPath().path.hasPrefix("/private/tmp/") ||
@@ -21,7 +21,7 @@ extension PetController {
             try initial.save(paths: paths)
             let original = try Data(contentsOf: paths.root.appendingPathComponent("sources.json"))
             sourceConfig = initial; queue = EventQueue(paths: paths)
-            // Reader construction is lazy; previewMode suppresses automatic polling after each save.
+            // 리더는 늦게 만들어진다. previewMode라서 저장할 때마다 자동 폴링하지 않는다.
             localReaders = [MessagesReader(handle: initial.messages?.handle), KakaoCombinedReader(name: initial.kakao?.name)]
             let oldMessages = ObjectIdentifier(localReaders[0]), oldKakao = ObjectIdentifier(localReaders[1])
             buildPanel(); buildMenu(); statusItem.isVisible = false
@@ -113,7 +113,7 @@ extension PetController {
         } catch { finish(["ok": false, "stage": 0]) }
     }
 
-    /// Regression for the recorded wall gaps and folded image rows, without user data or visible windows.
+    /// 기록된 벽 틈과 접힌 이미지 줄의 회귀 점검. 사용자 데이터나 보이는 창 없이 돌린다.
     func checkPetGeometry(to output: URL) {
         let view = CatView(frame: NSRect(origin: .zero, size: CatView.size))
         let rect = view.spriteRect
@@ -129,7 +129,7 @@ extension PetController {
                             view.press(left: press[0], right: press[1], bottom: press[2], top: press[3], immediately: true)
                             view.hold(at: held, side: side); view.setPull(pull)
                             var area = NSRect(x: rect.midX - 720, y: rect.midY - 450, width: 1440, height: 900)
-                            // A full drag trail still separates the panel's sprite from the screen boundary.
+                            // 끌림 자국이 최대여도 패널의 스프라이트와 화면 경계 사이엔 그만큼 거리가 있다.
                             if wall == 0 { area.origin.x = rect.minX - cap }
                             if wall == 1 { area.origin.x = rect.maxX + cap - area.width }
                             if wall == 2 { area.origin.y = rect.minY - cap }
@@ -182,8 +182,8 @@ extension PetController {
         catch { fputs("Could not save pet geometry report\n", stderr) }
     }
 
-    /// A tucked pet must have no physical effect, even when its old frame overlaps the messages.
-    /// Run the live layout/springs, comparing each corner with the same pet moved far off-screen.
+    /// 집어넣은 펫은 예전 자리가 메시지와 겹치더라도 물리적으로 아무 영향이 없어야 한다.
+    /// 실제 배치·스프링을 돌려, 모서리마다 같은 펫을 화면 밖 멀리 옮긴 경우와 비교한다.
     func checkBubbleGeometry(to output: URL, requireIdle: Bool = false) {
         let area = NSRect(x: 0, y: 0, width: 1440, height: 900)
         let corners: [(String, NSPoint)] = [("bottom-left", .zero), ("bottom-right", NSPoint(x: 1440, y: 0)),
@@ -213,7 +213,7 @@ extension PetController {
                     let pet = overlapping ? NSRect(x: anchor.x == 0 ? 0 : area.maxX - 140,
                         y: anchor.y == 0 ? 0 : area.maxY - 360, width: 140, height: 360)
                         : NSRect(x: -2000, y: -2000, width: 140, height: 360)
-                    // Arrivals grow from one bubble to the full mixed-source stack while already tucked.
+                    // 이미 집어넣은 상태에서 말풍선이 하나부터 여러 소스가 섞인 전체 묶음까지 늘어난다.
                     for count in 1...events.count {
                         bubble.show(Array(events.prefix(count)))
                         for _ in 0..<8 { place(pet: pet, area: area, animated: true) }

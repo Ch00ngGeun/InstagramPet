@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Independent numeric timing probe in existing Chrome DM tabs; never reads message DOM.
+"""열려 있는 Chrome DM 탭에서 도는 독립적인 숫자 전용 타이밍 측정기. 메시지 DOM은 읽지 않는다.
 
-Only URL prefixes are checked inside AppleScript to select the tabs; URLs, titles, tab
-IDs and message data are never returned. MutationObserver watches detached TextNodes,
-so the production Instagram detector cannot observe the synthetic changes.
+탭을 고를 때 AppleScript 안에서 URL 접두사만 확인하며, URL·제목·탭 ID·메시지 데이터는
+반환하지 않는다. MutationObserver는 문서에 붙지 않은 TextNode를 감시하므로
+실제 Instagram 감지기는 이 합성 변경을 볼 수 없다.
+
+실행: python3 scripts/measure-chrome-latency.py start|read|clear
 """
 import argparse
 import json

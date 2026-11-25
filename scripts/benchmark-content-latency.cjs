@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Synthetic timer-alignment model using the real content script before/after the change.
-// This is not a Chrome or real Instagram reception measurement.
+// 과거 git ref의 extension/content.js와 현재 작업 트리의 것을 비교하는 합성 타이머 정렬 모델.
+// 실제 Chrome이나 실제 Instagram 수신을 측정하는 것이 아니다.
+// 실행: node scripts/benchmark-content-latency.cjs [git ref, 기본값 6892cc4]
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');

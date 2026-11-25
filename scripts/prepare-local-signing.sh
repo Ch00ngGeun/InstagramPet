@@ -1,5 +1,6 @@
 #!/bin/bash
-# One local signing identity, restricted to codesign. No private material is kept in the repository.
+# codesign 전용 로컬 서명 ID 하나를 만든다. 개인 키 등 비밀 자료는 저장소에 남기지 않는다.
+# 한 번만 실행: scripts/prepare-local-signing.sh [--trust-code-signing]. 이후 build-app.sh가 이 ID로 서명한다.
 set +x
 set -euo pipefail
 umask 077
@@ -32,7 +33,7 @@ SCRATCH_DIR="$(mktemp -d /private/tmp/InstagramPet-signing.XXXXXXXX)"
 cleanup() { rm -rf -- "$SCRATCH_DIR"; }
 trap cleanup EXIT
 
-# Include invalid identities so a certificate awaiting narrow trust is reused rather than duplicated.
+# 아직 제한적 신뢰를 기다리는 인증서도 중복 생성 대신 재사용하도록 유효하지 않은 ID까지 포함한다.
 EXISTING="$(security find-identity -p codesigning "$KEYCHAIN" | awk -v wanted="$IDENTITY_NAME" '
     /^[[:space:]]*[0-9]+\)/ { split($0, quoted, "\""); if (quoted[2] == wanted && length($2) == 40) print $2 }
 ' | sort -u)"
@@ -41,8 +42,8 @@ if [[ "$EXISTING" == *$'\n'* ]]; then
     exit 1
 fi
 
-# A failed earlier import may have left a certificate without its private key. Remove only
-# exact-label certificates absent from *all* basic identities, including invalid ones.
+# 이전 가져오기가 실패해 개인 키 없는 인증서가 남았을 수 있다. 이름이 정확히 같고, 유효하지 않은 것을
+# 포함한 *모든* basic ID에 없는 인증서만 지운다.
 BASIC_IDENTITIES="$(security find-identity -p basic "$KEYCHAIN" | awk '
     /^[[:space:]]*[0-9]+\)/ { if (length($2) == 40) print $2 }
 ' | sort -u)"
@@ -81,14 +82,14 @@ keyUsage = critical,digitalSignature
 extendedKeyUsage = critical,codeSigning
 subjectKeyIdentifier = hash
 CONFIG
-    # OpenSSL's key material goes only into this mode-700 temporary directory, never tool output.
+    # OpenSSL 키 자료는 권한 700인 이 임시 디렉터리에만 쓰고, 도구 출력에는 절대 내보내지 않는다.
     openssl req -new -x509 -newkey rsa:3072 -nodes -sha256 -days 3650 \
         -config "$SCRATCH_DIR/openssl.cnf" -keyout "$SCRATCH_DIR/key.pem" -out "$SCRATCH_DIR/certificate.pem" \
         > "$SCRATCH_DIR/generation.log" 2>&1
     FINGERPRINT="$(openssl x509 -in "$SCRATCH_DIR/certificate.pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')"
-    # Use a single, explicit identity container: security's OpenSSL PEM importer does not
-    # accept every PKCS#8 encoding emitted by openssl req. A temporary random wrapping
-    # passphrase avoids the platform importer's empty-password incompatibility.
+    # 명시적인 ID 컨테이너(PKCS#12) 하나를 쓴다: security의 OpenSSL PEM 가져오기는 openssl req가
+    # 만드는 PKCS#8 인코딩을 모두 받지는 못한다. 임시 무작위 암호는 플랫폼 가져오기 도구가
+    # 빈 암호를 처리하지 못하는 문제를 피하기 위한 것이다.
     openssl rand -hex 32 > "$SCRATCH_DIR/wrapping-passphrase"
     openssl pkcs12 -export -inkey "$SCRATCH_DIR/key.pem" -in "$SCRATCH_DIR/certificate.pem" \
         -out "$SCRATCH_DIR/identity.p12" -passout "file:$SCRATCH_DIR/wrapping-passphrase" > "$SCRATCH_DIR/packaging.log" 2>&1
@@ -98,7 +99,7 @@ CONFIG
     unset PACKAGING_PASSPHRASE
 fi
 
-# Work on a disposable copy. The running app and its current privacy approvals are untouched.
+# 버려도 되는 복사본으로 시험한다. 실행 중인 앱과 기존 개인정보 보호 승인은 건드리지 않는다.
 cp /usr/bin/true "$SCRATCH_DIR/probe"
 if ! codesign --force --timestamp=none --identifier com.instagrampet.signing-probe --keychain "$KEYCHAIN" --sign "$FINGERPRINT" "$SCRATCH_DIR/probe" \
     > "$SCRATCH_DIR/signing.log" 2>&1; then
@@ -107,7 +108,7 @@ if ! codesign --force --timestamp=none --identifier com.instagrampet.signing-pro
         printf 'To permit narrowly scoped code-signing trust, rerun: %s --trust-code-signing\n' "$0" >&2
         exit 1
     fi
-    # No admin/system trust, SSL trust, allow-all key ACL, or key partition-list changes.
+    # 관리자/시스템 신뢰, SSL 신뢰, 모두 허용 키 ACL, 키 partition-list 변경은 하지 않는다.
     security add-trusted-cert -r trustRoot -p codeSign -a /usr/bin/codesign \
         -k "$KEYCHAIN" "$SCRATCH_DIR/certificate.pem"
     codesign --force --timestamp=none --identifier com.instagrampet.signing-probe --keychain "$KEYCHAIN" --sign "$FINGERPRINT" "$SCRATCH_DIR/probe"

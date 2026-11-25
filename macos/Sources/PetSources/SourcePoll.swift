@@ -1,6 +1,8 @@
 import Foundation
 import PetCore
 
+// 로컬 메시지 리더(KakaoTalk, Messages)의 공통 인터페이스와 한 번 폴링한 결과.
+
 public enum SourceStatus: String {
     case disabled, idle, observing, permissionRequired, unavailable
 }

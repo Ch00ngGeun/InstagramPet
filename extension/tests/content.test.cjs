@@ -1,3 +1,5 @@
+// 콘텐츠 스크립트 일정 검사: 변경 시 (느려지는 타이머 없이) 즉시 검사, 연속 변경 묶기,
+// 확인 응답 대기 뒤 재검사, 확장이 무효화되면 중단.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { contentHarness } = require('./helpers/content-harness.cjs');

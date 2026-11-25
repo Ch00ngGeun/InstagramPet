@@ -2,6 +2,9 @@ import Foundation
 import CryptoKit
 import Darwin
 
+// 공통 모델과 저장소: 메시지 이벤트, 대화 키, 디스크 이벤트 큐
+// (inbox, 중복 방지 receipt, 읽음 표시)와 Chrome 네이티브 메시징 프레임 처리.
+
 public enum PetError: Error, CustomStringConvertible {
     case invalid(String), io(String), queueFull
     public var description: String {
@@ -21,7 +24,7 @@ public enum PetSource: String, Codable, CaseIterable {
     }
 }
 
-/// Local sources use opaque keys, never contact names/handles in URLs or read-mark filenames.
+/// 로컬 소스는 불투명한 키를 쓴다. URL이나 읽음 표시 파일 이름에 연락처 이름/핸들을 절대 넣지 않는다.
 public struct ConversationKey: Codable, Hashable {
     public let source: PetSource
     public let key: String
@@ -121,12 +124,12 @@ public struct PetPaths {
     public let root: URL
     public var inbox: URL { root.appendingPathComponent("inbox", isDirectory: true) }
     public var receipts: URL { root.appendingPathComponent("receipts", isDirectory: true) }
-    /// "Read" marks: one content-free file per thread the user looked at in Chrome.
+    /// 읽음 표시: 사용자가 Chrome이나 펫에서 본 대화마다 내용 없는 파일 하나.
     public var reads: URL { root.appendingPathComponent("reads", isDirectory: true) }
     public var config: URL { root.appendingPathComponent("config.json") }
 
     public init(root: URL? = nil) {
-        // Override is for isolated automated tests/development; no network location is used.
+        // 환경 변수 재지정은 격리된 자동 테스트/개발용이며 네트워크 위치는 쓰지 않는다.
         let override = ProcessInfo.processInfo.environment["INSTAGRAMPET_HOME"]
         self.root = root ?? override.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? FileManager.default.homeDirectoryForCurrentUser
@@ -169,7 +172,7 @@ public final class EventQueue {
     public static let capacity = 200
     public init(paths: PetPaths = PetPaths()) { self.paths = paths }
 
-    /// Returns false for an already accepted event. Receipt ids contain no message content.
+    /// 이미 받은 이벤트면 false를 돌려준다. receipt ID에는 메시지 내용이 없다.
     @discardableResult public func enqueue(_ event: PetEvent) throws -> Bool {
         try event.validate()
         guard let observed = PetEvent.date(event.observedAt), Date().timeIntervalSince(observed) <= Self.retention else {
@@ -184,7 +187,7 @@ public final class EventQueue {
             guard try jsonFiles(paths.inbox).count < Self.capacity else { throw PetError.queueFull }
             let data = try JSONEncoder().encode(event)
             try atomicProtectedWrite(data, to: destination)
-            // Inbox presence also deduplicates if the process crashes before the receipt write.
+            // receipt를 쓰기 전에 프로세스가 죽어도 inbox에 파일이 있으면 중복이 걸러진다.
             try atomicProtectedWrite(Data("{\"acceptedAt\":\"\(PetEvent.timestamp())\"}".utf8), to: receipt)
             return true
         }
@@ -200,7 +203,7 @@ public final class EventQueue {
                     try event.validate()
                     result.append(event)
                 } catch {
-                    // Corrupt/untrusted files never reach the UI. Delete only queue-owned regular files.
+                    // 손상됐거나 믿을 수 없는 대기열 파일은 UI에 가지 않고 삭제된다(일반 파일만, jsonFiles 참고).
                     try? fileManager.removeItem(at: url)
                 }
             }
@@ -219,7 +222,7 @@ public final class EventQueue {
         }
     }
 
-    /// The user saw this thread in Chrome: remember when, and drop its not-yet-shown messages up to then.
+    /// 사용자가 Chrome에서 이 스레드를 봤다: 그 시각을 기억하고, 그때까지의 아직 안 보인 메시지는 버린다.
     public func markRead(threadUrl: String, at date: Date = Date()) throws {
         try markRead(ConversationKey(source: .instagram, key: threadUrl), at: date)
     }
@@ -241,7 +244,7 @@ public final class EventQueue {
         }
     }
 
-    /// Latest read time per thread URL, within the 24h retention.
+    /// 대화별(모든 소스) 최근 읽은 시각. 24시간 보관 기간 안의 것만.
     public func reads() throws -> [ConversationKey: Date] {
         try locked {
             try cleanup()
@@ -261,14 +264,14 @@ public final class EventQueue {
 
     public func count() throws -> Int { try locked { try cleanup(); return try jsonFiles(paths.inbox).count } }
 
-    /// Removes pending message content. Retains content-free receipts to suppress retries.
+    /// 대기 중인 메시지 내용을 지운다. 재전송을 막는 내용 없는 receipt는 남긴다.
     public func clear() throws {
         try locked { for url in try jsonFiles(paths.inbox) { try fileManager.removeItem(at: url) } }
     }
 
     private func digest(_ id: String) -> String { SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined() }
     private func eventFilename(_ event: PetEvent) -> String {
-        // Keep old Instagram receipts valid after upgrading.
+        // 업그레이드 후에도 예전 Instagram receipt가 유효하도록 유지한다.
         digest(event.source == .instagram ? event.eventId : event.source.rawValue + "\0" + event.eventId) + ".json"
     }
 
@@ -285,9 +288,10 @@ public final class EventQueue {
         return try body()
     }
 
+    /// 대기열이 만든 일반 파일만 돌려준다. 이름이 .json인 폴더·심볼릭 링크는 읽지도 지우지도 않는다.
     private func jsonFiles(_ directory: URL) throws -> [URL] {
-        try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "json" }
+        try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey])
+            .filter { $0.pathExtension == "json" && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
     }
 
     private func protectedRead(_ url: URL) throws -> Data {
@@ -327,7 +331,7 @@ public final class EventQueue {
                 } catch { try? fileManager.removeItem(at: url) }
             }
         }
-        // Bound content-free receipts under long sessions; pending inbox ids still deduplicate.
+        // 오래 켜 둘 때 내용 없는 receipt 수를 제한한다. 대기 중인 inbox ID로도 중복은 걸러진다.
         let receipts = try jsonFiles(paths.receipts)
         if receipts.count > 4096 {
             let ordered = receipts.sorted {
@@ -340,7 +344,7 @@ public final class EventQueue {
     }
 }
 
-/// Chrome native messaging frames are UInt32 native endian + UTF-8 JSON.
+/// Chrome 네이티브 메시징 프레임은 UInt32(네이티브 엔디언) 길이 + UTF-8 JSON이다.
 public enum NativeFrame {
     public static let maxBytes: UInt32 = 65_536
     public static func read(from input: FileHandle) throws -> Data? {

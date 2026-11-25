@@ -1,7 +1,10 @@
 import Foundation
 import Darwin
 
-/// Contact selection belongs to the user's private sources.json. Only Instagram is shared with the extension.
+// 사용자의 연락처 선택(sources.json): 검증, 비공개 원자적 저장, Messages 핸들
+// 정규화, 그리고 말풍선을 눌렀을 때 열 대화 위치.
+
+/// 연락처 선택은 사용자의 비공개 sources.json에 있다. 확장 프로그램에는 Instagram만 넘긴다.
 public struct SourcesConfig: Codable, Equatable {
     public struct Instagram: Codable, Equatable {
         public let username: String
@@ -18,13 +21,13 @@ public struct SourcesConfig: Codable, Equatable {
     }
     public var kakao: Kakao?
     public var messages: Messages?
-    /// Missing means extension manual settings remain authoritative; an empty pair explicitly disables Instagram.
+    /// 값이 없으면 확장 프로그램의 수동 설정을 따르고, 빈 쌍이면 Instagram을 명시적으로 끈다.
     public var instagram: Instagram?
     public init(kakao: Kakao? = nil, messages: Messages? = nil, instagram: Instagram? = nil) {
         self.kakao = kakao; self.messages = messages; self.instagram = instagram
     }
 
-    /// Existing scalar JSON fields remain compatible; multiple selections use canonical ASCII commas.
+    /// 기존 단일 값 JSON 필드와 호환된다. 여러 개 선택은 표준 ASCII 쉼표로 구분한다.
     public var instagramSelections: [Instagram] {
         guard let value = try? validated(), let selected = value.instagram, !selected.username.isEmpty else { return [] }
         return zip(selected.username.components(separatedBy: ","), selected.threadId.components(separatedBy: ","))
@@ -104,7 +107,7 @@ public struct SourcesConfig: Codable, Equatable {
         return try value.validated()
     }
 
-    /// Validate everything before replacing the file so a failed edit never partially changes selection.
+    /// 파일을 바꾸기 전에 전부 검증해서, 실패한 수정이 선택을 일부만 바꾸는 일이 없게 한다.
     public func validated() throws -> SourcesConfig {
         var value = self
         if let name = value.kakao?.name {
@@ -149,7 +152,7 @@ public struct SourcesConfig: Codable, Equatable {
         return value
     }
 
-    /// Private atomic replacement through a pinned, no-follow directory; no plaintext temporary copy is left behind.
+    /// 고정된(심볼릭 링크를 따르지 않는) 디렉터리를 통한 비공개 원자적 교체. 평문 임시 사본이 남지 않는다.
     public func save(paths: PetPaths) throws {
         let value = try validated()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -170,11 +173,11 @@ public struct SourcesConfig: Codable, Equatable {
         guard renameat(directory, staged, directory, "sources.json") == 0 else {
             throw PetError.io("cannot commit sources configuration")
         }
-        // The file is already durably written; directory fsync is best effort on filesystems that reject it.
+        // 파일은 이미 디스크에 기록됐다. 디렉터리 fsync는 거부하는 파일 시스템도 있어 최선 노력으로만 한다.
         _ = fsync(directory)
     }
 
-    /// Explicit Korean mobile local/international equivalence; other numbers keep country codes.
+    /// 한국 휴대폰 번호만 국내/국제 표기를 같게 본다. 다른 번호는 국가 번호를 그대로 둔다.
     public static func normalizeHandle(_ input: String) -> String? {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if value.contains("@") {

@@ -1,3 +1,5 @@
+// Instagram 페이지의 콘텐츠 스크립트: DOM이 바뀔 때마다 검사해 새 DM 관찰,
+// 읽음 표시, 진단 신호를 서비스 워커로 보낸다.
 (() => {
   "use strict";
   const C = PetCommon, D = PetDetector;
@@ -17,8 +19,8 @@
   function schedule() {
     if (stopped || scheduled) return;
     scheduled = true;
-    // Mutations already arrive as a batch. Do not put an actual DOM change behind a
-    // background-tab timer, which Chrome can align to seconds or minutes.
+    // 변경은 이미 묶음으로 들어온다. 실제 DOM 변화를 백그라운드 탭 타이머 뒤로 미루지 않는다.
+    // Chrome은 그 타이머를 초나 분 단위로 맞춰 늦출 수 있다.
     queueMicrotask(() => { scheduled = false; scan(); });
   }
   async function scan() {
@@ -27,7 +29,7 @@
     running = true;
     try {
       const now = Date.now(), path = location.pathname;
-      // A long renderer pause is a gap, not a license to announce an old transcript.
+      // 렌더러가 오래 멈췄던 건 공백일 뿐, 지난 대화를 새로 알릴 이유가 아니다.
       if (path !== lastPath || now - lastScan > 120000) tracker.reset();
       lastPath = path; lastScan = now;
       const onDirect = /^\/direct(?:\/|$)/.test(path);
@@ -39,18 +41,18 @@
         for (const event of tracker.observe(snapshot, config.allowedSenders, now)) {
           metadata.observations++;
           outbox.set(event.eventId, event);
-          readSent = false; // a new message while the user is looking at this thread is read too
+          readSent = false; // 사용자가 이 스레드를 보는 중에 온 새 메시지도 읽음으로 처리한다
         }
         while (outbox.size > 50) { outbox.delete(outbox.keys().next().value); metadata.dropped++; }
         for (const [id, event] of outbox) {
           if (now - Date.parse(event.observedAt) > 300000) { outbox.delete(id); metadata.dropped++; continue; }
           const response = await send({ type: "pet.observation", event });
-          // Advance a transient content outbox only when the worker persisted or deduplicated it.
+          // 워커가 저장했거나 중복으로 판정한 경우에만 임시 보낼함에서 뺀다.
           if (response?.ok) outbox.delete(id);
           else break;
         }
       } else { tracker.reset(); outbox.clear(); }
-      // The user is looking at this thread in a focused window: its pet bubbles can go away.
+      // 사용자가 포커스된 창에서 이 스레드를 보고 있다: 해당 펫 말풍선은 없애도 된다.
       const thread = C.threadURL(location.href);
       if (config.enabled && thread && document.visibilityState === "visible" && document.hasFocus()) {
         if (!readSent) { readSent = true; if (!(await send({ type: "pet.read", threadUrl: thread.url }))?.ok) readSent = false; }
@@ -66,7 +68,7 @@
   const observer = new MutationObserver(schedule);
   observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true,
     attributes: true, attributeFilter: ["aria-label", "aria-hidden", "aria-describedby", "href", "datetime", "title"] });
-  const poll = setInterval(schedule, 5000); // SPA navigation and missed renderer updates; Chrome may throttle this.
+  const poll = setInterval(schedule, 5000); // SPA 이동과 놓친 렌더러 갱신 대비. Chrome이 이 주기를 늦출 수 있다.
   addEventListener("pageshow", event => { if (event.persisted) tracker.reset(); schedule(); });
   addEventListener("pagehide", () => tracker.reset());
   addEventListener("focus", schedule);

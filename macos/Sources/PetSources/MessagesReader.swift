@@ -4,7 +4,10 @@ import SQLite3
 import CryptoKit
 import PetCore
 
-/// Confined to the app's serial I/O queue. No database writes, helper process or message logging.
+// Messages 리더: chat.db를 읽기 전용으로 폴링해 선택한 핸들 하나에서 온 안 읽은 1:1 메시지를 찾고,
+// 사용자가 읽으면 읽음 표시를 알린다.
+
+/// 앱의 직렬 I/O 큐 안에서만 쓴다. DB 쓰기, 보조 프로세스, 메시지 로그 기록은 없다.
 public final class MessagesReader: LocalSourceReader {
     public let source = PetSource.messages
     public static var defaultDatabaseURL: URL {
@@ -54,7 +57,7 @@ public final class MessagesReader: LocalSourceReader {
         for identity in identities { outbox.removeValue(forKey: identity) }
     }
 
-    /// Reconnect only already-accepted queue events; ordinary database history stays a launch baseline.
+    /// 이미 큐에 들어간 이벤트만 다시 연결한다. 일반 DB 기록은 실행 시점 기준선으로 남는다.
     public func restorePending(_ events: [PetEvent]) {
         guard let conversation else { return }
         restoring = Array(events.lazy.filter {
@@ -96,7 +99,7 @@ public final class MessagesReader: LocalSourceReader {
                 try updateReads(database, conversation: conversation)
                 return batch(.observing)
             }
-            // Deleting the highest ROWID shrinks the cursor, not the lifetime of earlier pending bodies.
+            // 가장 큰 ROWID가 지워지면 커서는 줄지만, 앞서 본문을 기다리던 행의 수명은 줄지 않는다.
             let lowerCursor = min(cursor, maximum)
 
             if !unresolved.isEmpty {
@@ -107,7 +110,7 @@ public final class MessagesReader: LocalSourceReader {
                 for row in rows { try receive(row, database: database, baselineAt: baselineAt, now: now, conversation: conversation) }
             }
 
-            // Stop at the bound rather than discarding unacknowledged events or unread tracking.
+            // 확인 안 된 이벤트나 안 읽음 추적을 버리지 말고 한도에서 멈춘다.
             let occupied = Set(watched.values.map(\.identity)).union(outbox.keys).count + unresolved.count
             let room = max(0, Self.capacity - occupied)
             var nextCursor = lowerCursor
@@ -230,7 +233,7 @@ public final class MessagesReader: LocalSourceReader {
         return result
     }
 
-    /// Older databases do not expose the reaction type column.
+    /// 오래된 DB에는 반응(tapback) 종류 열이 없다.
     private func hasAssociatedMessageType(_ database: OpaquePointer) throws -> Bool {
         let query = try statement(database, "PRAGMA table_info(message)")
         defer { sqlite3_finalize(query) }
@@ -268,8 +271,8 @@ public final class MessagesReader: LocalSourceReader {
             unresolved.removeValue(forKey: row.id)
             return
         }
-        // Use the wire timestamp's precision for watermarks too: two observations in one millisecond
-        // must remain a tie, otherwise rounding could make the newer unread bubble look older.
+        // 워터마크에도 전송용 타임스탬프 정밀도를 쓴다: 같은 밀리초 안의 두 관측은
+        // 동률이어야 한다. 아니면 반올림 때문에 더 새 안 읽은 말풍선이 더 오래된 것처럼 보일 수 있다.
         let observedAt = unresolved[row.id]?.firstObservedAt ?? (PetEvent.date(PetEvent.timestamp(now)) ?? now)
         var text = try messageText(row, database: database)
         if text.isEmpty {
@@ -298,7 +301,7 @@ public final class MessagesReader: LocalSourceReader {
         return String(([plain] + labels).filter { !$0.isEmpty }.joined(separator: "\n").prefix(2000))
     }
 
-    /// A ROWID alone can be reused after database replacement. Bind it to this file and row timestamp.
+    /// ROWID만으로는 DB가 교체된 뒤 재사용될 수 있다. 이 파일과 행 타임스탬프에 묶는다.
     private func rowFingerprint(_ row: Row) -> String? {
         guard let databaseIdentity, let sentAt = row.sentAt else { return nil }
         let value = "\(databaseIdentity.device):\(databaseIdentity.inode):\(databaseIdentity.createdSeconds):\(databaseIdentity.createdNanoseconds):\(row.id):\(sentAt.timeIntervalSinceReferenceDate.bitPattern)"
@@ -325,7 +328,7 @@ public final class MessagesReader: LocalSourceReader {
         for row in found {
             guard let (event, expected, observed) = candidates[row.id], rowFingerprint(row) == expected else { continue }
             let body = try messageText(row, database: database)
-            // A fallback still belongs to this fingerprinted row if its body hydrated later.
+            // 대체 문구로 보낸 이벤트도 나중에 본문이 채워졌다면 여전히 이 지문의 행에 속한다.
             guard body == event.text || event.text == Self.missingBody else { continue }
             watched[row.id] = Watched(identity: event.identity, observedAt: observed)
         }
@@ -354,11 +357,11 @@ public final class MessagesReader: LocalSourceReader {
                 pendingDeletedThrough = max(pendingDeletedThrough ?? .distantPast, removed.observedAt)
             }
         }
-        // A later read row must never erase an earlier still-unread row.
+        // 나중 행이 읽혔다고 해서 아직 안 읽은 앞선 행을 지우면 안 된다.
         let firstUnread = (watched.filter { !read.contains($0.key) }.map { $0.value.observedAt }
             + unresolved.values.map(\.firstObservedAt)).min() ?? .distantFuture
         var resolved = watched.filter { read.contains($0.key) && $0.value.observedAt < firstUnread }.map { $0.value.observedAt }
-        // Keep only the furthest deletion until older unread messages permit a safe watermark.
+        // 더 오래된 안 읽은 메시지가 안전한 워터마크를 허용할 때까지 가장 늦은 삭제 시각만 기억한다.
         if let deleted = pendingDeletedThrough, deleted < firstUnread { resolved.append(deleted) }
         guard let through = resolved.max() else { return }
         readThrough = max(readThrough ?? .distantPast, through)
@@ -369,7 +372,7 @@ public final class MessagesReader: LocalSourceReader {
         }
     }
 
-    /// Decode only an expected attributed-string root; never instantiate arbitrary archived classes.
+    /// 예상한 attributed string 루트만 디코딩한다. 아카이브된 임의 클래스는 절대 만들지 않는다.
     private static func decodeAttributedBody(_ data: Data) -> String? {
         guard !data.isEmpty, data.count <= 65_536 else { return nil }
         if data.starts(with: Data("bplist00".utf8)) {

@@ -1,11 +1,12 @@
+// 콘텐츠 테스트용으로 가짜 DOM, Chrome API, 조작 가능한 시계·타이머와 함께 content.js를 VM에서 실행한다.
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const C = require('../../common.js');
 const D = require('../../detector.js');
 
-// Deterministic scheduling model, not a Chrome performance measurement. A nonzero
-// quantum aligns timer wakeups; actual DOM-event/microtask delivery stays independent.
+// 결정적인 일정 모형일 뿐 Chrome 성능 측정이 아니다. quantum이 0이 아니면 타이머 깨어남을
+// 그 단위로 맞추고, 실제 DOM 이벤트·마이크로태스크 전달은 그와 무관하다.
 function contentHarness({ source, timerQuantum = 0, now = 10000, hidden = true, holdResponses = false } = {}) {
   const code = source ?? fs.readFileSync(path.join(__dirname, '../../content.js'), 'utf8');
   const tasks = new Map(), microtasks = [], listeners = new Map(), responses = [], sent = [], observations = [];

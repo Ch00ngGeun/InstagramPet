@@ -2,8 +2,10 @@ import AppKit
 import PetCore
 import PetSources
 
+// 시간제 숨기기, 화살표 뒤로 펫 집어넣기, 펫·화살표 끌기, 말풍선 오버레이 배치.
+
 extension PetController {
-    // MARK: Temporary hiding (never indefinite)
+    // MARK: 시간제 숨기기(무기한은 없음)
 
     @objc func hideBubblesFor(_ sender: NSMenuItem) {
         hideBubblesUntil = Date().addingTimeInterval(TimeInterval(sender.tag * 60))
@@ -15,7 +17,7 @@ extension PetController {
     @objc func hidePetFor(_ sender: NSMenuItem) {
         hidePetUntil = Date().addingTimeInterval(TimeInterval(sender.tag * 60))
         bubble.isHidden = true; cat.excited = false
-        // Only the small slime arrow stays, so the pet can always be called back.
+        // 작은 슬라임 화살표만 남겨서 언제든 펫을 다시 부를 수 있다.
         panel.orderOut(nil)
         arrowKey = ""
         updateStatus()
@@ -39,7 +41,7 @@ extension PetController {
         if let until = hideBubblesUntil, until <= now { resumeBubbles(); updateStatus() }
     }
 
-    /// Coming back shows the newest message with the two before it, not a slow replay of the backlog.
+    /// 다시 나올 때는 밀린 메시지를 천천히 재생하지 않고, 최신 메시지와 그 앞 메시지들(Orbit 상한 안)을 한 번에 보여 준다.
     func resumeBubbles() {
         hideBubblesUntil = nil
         arrowKey = ""
@@ -59,7 +61,7 @@ extension PetController {
         presentNextIfPossible()
     }
 
-    /// The arrow follows the pointer exactly, and the hidden pet moves with it, so a click brings it out there.
+    /// 화살표는 포인터를 정확히 따라가고 숨은 펫도 함께 옮겨지므로, 클릭하면 그 자리에서 나온다.
     func dragArrow(_ delta: NSPoint) {
         if arrowDragStart == nil { arrowDragStart = (panel.frame.origin, arrow.frame.origin) }
         guard let start = arrowDragStart else { return }
@@ -68,7 +70,7 @@ extension PetController {
         lastCatOrigin = panel.frame.origin
     }
 
-    /// Dropped anywhere: the arrow settles flush on the nearest screen edge, the hidden pet moving with it.
+    /// 어디에 놓든 화살표는 가장 가까운 화면 가장자리에 딱 붙고, 숨은 펫도 함께 옮겨진다.
     func arrowDropped() {
         arrowDragStart = nil; arrowKey = ""
         guard isTucked, let screen = catScreen() else { return }
@@ -83,9 +85,9 @@ extension PetController {
         showNow()
     }
 
-    // MARK: Layout
+    // MARK: 배치
 
-    /// The screen showing most of the pet, or the nearest one when it is tucked fully off-screen.
+    /// 펫이 가장 많이 보이는 화면. 펫이 화면 밖으로 완전히 들어갔으면 가장 가까운 화면.
     private func catScreen() -> NSScreen? {
         let sprite = catSpriteOnScreen()
         func overlap(_ screen: NSScreen) -> CGFloat { let x = screen.frame.intersection(sprite); return x.width * x.height }
@@ -103,17 +105,16 @@ extension PetController {
         if overlay.frame != screen.frame { overlay.setFrame(screen.frame, display: false) }
         let origin = overlay.frame.origin
         let pet = cat.bodyRect.offsetBy(dx: panel.frame.minX + cat.frame.minX - origin.x, dy: panel.frame.minY + cat.frame.minY - origin.y)
-        // The display's real border, like the pet: bubbles and the arrow press flush into the very corner,
-        // over the menu bar and Dock, with no gap.
+        // 펫과 마찬가지로 디스플레이의 실제 경계: 말풍선과 화살표가 메뉴 막대와 Dock 위로
+        // 모서리 끝까지 틈 없이 붙는다.
         let area = screen.frame.offsetBy(dx: -origin.x, dy: -origin.y)
         place(pet: pet, area: area, animated: animated)
     }
 
-    /// Shared by the live overlay and the preview renderer.
+    /// 실제 오버레이와 미리보기 렌더러가 함께 쓴다.
     func place(pet: NSRect, area: NSRect, animated: Bool) {
-        // Tucked away: the bubbles line up along the edge where the arrow sits (the pet's spot, clamped on screen).
-        // Tucked away: everything follows the arrow. It starts at the pet's spot (clamped on screen), moves with
-        // a drag, and settles on the nearest edge when dropped.
+        // 집어넣은 상태: 모두 화살표를 따른다. 화살표는 펫 자리(화면 안으로 제한)에서 시작해 끌면 함께
+        // 움직이고, 놓으면 가장 가까운 가장자리에 자리 잡는다.
         if isTucked {
             if tuckArrowCenter == nil {
                 tuckArrowCenter = Orbit.snapToEdge(NSPoint(x: min(max(pet.midX, area.minX), area.maxX), y: min(max(pet.midY, area.minY), area.maxY)), area: area)
@@ -122,7 +123,7 @@ extension PetController {
             Orbit.tuckAnchor = tuckArrowCenter
         } else { Orbit.tuckAnchor = nil; tuckArrowCenter = nil }
         if !bubble.isHidden { bubble.update(pet: pet, area: area, animated: animated, petIsSolid: !isTucked && !isHidden) }
-        // The arrow appears whenever something is hidden — the pet, or just its bubbles — so a click always undoes it.
+        // 무언가 숨겨져 있으면(펫이든 말풍선만이든) 화살표가 나타나서, 클릭 한 번으로 늘 되돌릴 수 있다.
         let tucked = isHidden || isTucked || paused
         arrow.isHidden = !tucked
         guard !arrow.isHidden else { return }
@@ -163,11 +164,11 @@ extension PetController {
         guard !cat.isDragging, !arrow.isDragging else { return }
         let mouse = NSEvent.mouseLocation
         let catBounds = cat.spriteRect.offsetBy(dx: cat.frame.minX, dy: cat.frame.minY)
-        // Transparent space must allow interaction with the application underneath.
+        // 투명한 곳에선 아래 앱을 조작할 수 있어야 한다.
         if !isHidden && !isTucked {
             let over = catBounds.contains(panel.convertPoint(fromScreen: mouse))
             if panel.ignoresMouseEvents == over { panel.ignoresMouseEvents = !over }
-            // An open hand over the pet (re-asserted on every move, since other apps reset the cursor).
+            // 펫 위에선 펼친 손 커서(다른 앱이 커서를 바꾸므로 움직일 때마다 다시 정한다).
             if over { NSCursor.openHand.set() } else if overPet { NSCursor.arrow.set() }
             overPet = over
         } else if overPet { NSCursor.arrow.set(); overPet = false }
@@ -176,13 +177,14 @@ extension PetController {
         if overlay.ignoresMouseEvents != ignores { overlay.ignoresMouseEvents = ignores }
     }
 
-    /// A drop that leaves almost nothing of the pet on screen tucks it away behind its arrow.
-    /// Dragging into an edge: the pet stays on screen and is pressed into the wall by however far the pointer
-    /// went past it. The screen under the pointer counts, so the pet can still move between displays.
+    // MARK: 펫 끌기와 집어넣기
+
+    /// 가장자리로 끌면 펫은 화면 안에 머물고, 포인터가 넘어간 만큼 벽에 눌린다.
+    /// 포인터 아래 화면을 기준으로 하므로 펫은 여전히 다른 디스플레이로 옮겨 갈 수 있다.
     func dragPet(to origin: NSPoint) {
         let sprite = cat.spriteRect.offsetBy(dx: origin.x + cat.frame.minX, dy: origin.y + cat.frame.minY)
         let mouse = NSEvent.mouseLocation
-        // The pet's walls are the display's real border (over the menu bar and Dock), so it squashes flush.
+        // 펫의 벽은 디스플레이의 실제 경계(메뉴 막대와 Dock 위)라서 딱 붙어 찌그러진다.
         guard let area = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? catScreen())?.frame else { return }
         let left = max(0, area.minX - sprite.minX), right = max(0, sprite.maxX - area.maxX)
         let bottom = max(0, area.minY - sprite.minY), top = max(0, sprite.maxY - area.maxY)
@@ -190,12 +192,12 @@ extension PetController {
         petDragArea = area
         cat.press(left: left, right: right, bottom: bottom, top: top)
         lastPress = (left, right, bottom, top)
-        followPet(step: 0) // re-pull at the mouse's own event rate, not just on the 20 fps tick
+        followPet(step: 0) // 20fps 틱만이 아니라 마우스 이벤트마다 다시 당긴다
     }
 
-    /// The body eases after the pointer; the grabbed spot stays under it, so the gap is drawn as the pull.
-    /// Rubbing back and forth fast therefore squashes the held part while the body barely moves.
-    /// A gap beyond 15% of the height drags the body along.
+    /// 몸은 포인터를 천천히 따라가고 잡은 지점은 포인터 아래에 머무르므로, 그 차이가 당김으로 그려진다.
+    /// 그래서 빠르게 앞뒤로 문지르면 몸은 거의 안 움직이고 잡은 부분만 찌그러진다.
+    /// 차이가 높이의 15%를 넘으면 몸이 끌려온다.
     func followPet(step: CGFloat) {
         guard let target = petTarget else { return }
         var origin = panel.frame.origin
@@ -216,12 +218,13 @@ extension PetController {
         }
     }
 
-    /// Panel motion and screen-local wall coordinates must change in the same mouse event.
+    /// 패널 이동과 화면 기준 벽 좌표는 같은 마우스 이벤트 안에서 함께 바뀌어야 한다.
     func updatePetArea() {
         guard let area = petDragArea ?? catScreen()?.frame else { return }
         cat.area = area.offsetBy(dx: -panel.frame.minX - cat.frame.minX, dy: -panel.frame.minY - cat.frame.minY)
     }
 
+    /// 모서리의 두 벽에 cornerPress 이상 눌린 채 놓으면 펫이 화살표 뒤로 들어간다.
     func droppedPet() {
         let press = lastPress
         let corner = max(press.left, press.right) >= Self.cornerPress && max(press.bottom, press.top) >= Self.cornerPress
@@ -231,7 +234,7 @@ extension PetController {
             if let target = petTarget { panel.setFrameOrigin(target) }
             petTarget = nil; petDragArea = nil
             cat.setPull(.zero)
-            // Slip just past the corner, so the arrow and incoming bubbles huddle right in it.
+            // 모서리를 살짝 넘어가게 해서 화살표와 새 말풍선이 그 모서리에 바로 모이게 한다.
             let sprite = catSpriteOnScreen()
             let dx = press.right > press.left ? sprite.width - 20 : -(sprite.width - 20)
             let dy = press.top > press.bottom ? sprite.height - 20 : -(sprite.height - 20)
@@ -245,10 +248,10 @@ extension PetController {
             petDragArea = nil
             clampPosition()
             persistPosition()
-        } // otherwise the body finishes catching up on the tick, then clamps and saves
+        } // 아니면 몸이 틱마다 마저 따라온 뒤 위치를 제한하고 저장한다
     }
 
-    /// Pop the pet back out, fully on screen next to the edge it was tucked behind.
+    /// 펫을 다시 꺼낸다: 숨어 있던 가장자리 옆, 화면 안에 완전히 보이게.
     private func untuck() {
         tuckedUntil = nil
         clampPosition(keep: .infinity)
@@ -260,7 +263,7 @@ extension PetController {
     }
 
     func clampPosition(keep requested: CGFloat = PetController.keepVisible) {
-        // The character may hide partly off-screen, but keepVisible points of it always stay reachable.
+        // 캐릭터를 축마다 `requested` pt는 화면 안에 남긴다. 기본값 keepVisible(무한대)이면 완전히 화면 안에 둔다.
         let sprite = catSpriteOnScreen()
         guard let area = catScreen()?.frame else { return }
         let keepX = min(requested, sprite.width), keepY = min(requested, sprite.height)

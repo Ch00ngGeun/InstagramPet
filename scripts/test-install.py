@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise the real installer in a temporary per-user layout, never the user's Chrome profile."""
+"""실제 설치 스크립트를 임시 사용자 디렉터리 구조에서 시험한다. 사용자의 Chrome 프로필은 건드리지 않는다.
+
+실행: python3 scripts/test-install.py
+"""
 import json
 import os
 from pathlib import Path

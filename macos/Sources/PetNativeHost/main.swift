@@ -2,6 +2,9 @@ import Foundation
 import Darwin
 import PetCore
 
+// Chrome 네이티브 메시징 호스트: 호출자가 설치된 확장 프로그램인지 확인하고, Instagram DM과 읽음 표시를
+// 큐에 넣고, Instagram 연락처 선택을 알려 준다. 로컬용 --status/--demo/--clear 명령도 있다.
+
 private func diagnostic(_ message: String) {
     FileHandle.standardError.write(Data(("InstagramPet bridge: " + message + "\n").utf8))
 }
@@ -14,7 +17,7 @@ let paths = PetPaths()
 let queue = EventQueue(paths: paths)
 let arguments = Array(CommandLine.arguments.dropFirst())
 
-// Development commands deliberately do not use framed stdout. Chrome never passes these switches.
+// 개발용 명령은 일부러 프레임 없는 stdout을 쓴다. Chrome은 이 옵션을 넘기지 않는다.
 if arguments.first == "--status" || arguments.first == "--demo" || arguments.first == "--clear" {
     do {
         try paths.prepare()
@@ -67,12 +70,12 @@ func launchPetIfConfigured() {
     do { try task.run(); launcher = task } catch { diagnostic("could not launch pet; open the installed app manually") }
 }
 
-// Ignore broken pipe so a Chrome disconnect exits cleanly instead of a crash report.
+// broken pipe를 무시해서, Chrome 연결이 끊기면 크래시 리포트 없이 깔끔하게 끝낸다.
 signal(SIGPIPE, SIG_IGN)
 do {
-    // A command-line loop has no run loop draining autoreleased Foundation objects, so each request,
-    // including the stdin reads, runs in its own pool. Without it the host kept two 8KB read buffers per
-    // message: 1.4GB after 5 days of 5-second config syncs.
+    // 명령줄 루프에는 autorelease된 Foundation 객체를 비워 줄 run loop가 없으므로, 요청마다
+    // (stdin 읽기 포함) 자기 풀 안에서 돈다. 이게 없을 때 호스트는 메시지마다 8KB 읽기 버퍼 두 개를 남겨
+    // 5초 간격 설정 동기화 5일 만에 1.4GB가 됐다.
     while try autoreleasepool(invoking: { () throws -> Bool in
         guard let payload = try NativeFrame.read(from: .standardInput) else { return false }
         do {
@@ -84,8 +87,8 @@ do {
                     "appInstalled": FileManager.default.fileExists(atPath: config.appPath)])
             } else if type == "config" {
                 guard Set(request.keys) == Set(["version", "type"]) else { throw PetError.invalid("configuration request") }
-                // Re-read on every request: this connection may outlive edits made in the app.
-                // SourcesConfig validates each comma-separated pair; no other contact data crosses this boundary.
+                // 요청마다 다시 읽는다: 이 연결은 앱에서 바꾼 설정보다 오래 살아 있을 수 있다.
+                // SourcesConfig가 쉼표로 나뉜 쌍을 하나씩 검증한다. 다른 연락처 데이터는 이 경계를 넘지 않는다.
                 let selected = try SourcesConfig.load(paths: paths).instagram
                 var instagram: Any = NSNull()
                 if let selected { instagram = ["username": selected.username, "threadId": selected.threadId] }
@@ -95,17 +98,17 @@ do {
                 guard event.source == .instagram else { throw PetError.invalid("Chrome source") }
                 let isNew = try queue.enqueue(event)
                 try response(["version": 1, "type": "ack", "eventId": event.eventId, "ok": true, "queued": true])
-                // A retry of an accepted event need not re-open the app after the user has quit it.
+                // 이미 받은 이벤트의 재전송 때문에 사용자가 종료한 앱을 다시 열 필요는 없다.
                 if isNew { launchPetIfConfigured() }
             } else if type == "read" {
                 guard request["source"] == nil || request["source"] as? String == "instagram" else { throw PetError.invalid("Chrome source") }
-                // Only a validated thread URL is stored; the host's own clock decides what counts as read.
+                // 검증된 스레드 URL만 저장한다. 어디까지 읽었는지는 호스트 자신의 시계로 정한다.
                 guard let thread = request["threadUrl"] as? String, PetEvent.isThreadURL(thread) else { throw PetError.invalid("thread URL") }
                 try queue.markRead(threadUrl: thread)
                 try response(["version": 1, "type": "ack", "ok": true])
             } else { throw PetError.invalid("unsupported request type") }
         } catch {
-            // Never echo untrusted JSON, sender, URL, message text, or decoder diagnostics.
+            // 믿을 수 없는 JSON, 보낸 사람, URL, 메시지 내용, 디코더 진단 메시지를 절대 되돌려 보내지 않는다.
             let reason = (error as? PetError)?.description ?? "invalid JSON/schema or local storage failure"
             try response(["version": 1, "type": "error", "ok": false, "error": reason])
             diagnostic(reason)
@@ -113,7 +116,7 @@ do {
         return true
     }) {}
 } catch {
-    // A malformed/truncated frame loses stream alignment; close the port instead of guessing.
+    // 잘못됐거나 잘린 프레임은 스트림 위치를 잃게 하므로, 추측하지 말고 포트를 닫는다.
     diagnostic("framing/connection closed")
     exit(1)
 }

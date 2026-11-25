@@ -2,6 +2,9 @@ import Foundation
 import PetCore
 import PetSources
 
+// 합성 손쉬운 사용(AX) 트리로 KakaoReader 검사: 이름 매칭, 행 파싱, 안 읽음 배지와
+// 미리보기 변화 감지, 읽음 표시, 기준선 재설정, 재시도 outbox 한도.
+
 private func kakaoRow(name: String = "Fixture Friend💕", preview: String = "fixture old", time: String = "오후 1:23",
                       badge: String? = "2", y: CGFloat = 50, extra: [KakaoAXNode] = [], complete: Bool = true,
                       duplicateBadgeFrame: Bool = false) -> KakaoAXNode {
@@ -27,8 +30,8 @@ private func kakaoTree(_ row: KakaoAXNode = kakaoRow(), others: [KakaoAXNode] = 
     ], complete: complete)
 }
 
-/// Measured chat-list roles and relative geometry with synthetic content. The preview's
-/// accessibility frame extends four points below its 74-point row in this layout.
+/// 실측한 채팅 목록 역할과 상대 위치에 합성 내용을 넣은 것. 이 배치에서 미리보기의
+/// 손쉬운 사용 프레임은 74pt 행보다 4pt 아래로 삐져나온다.
 private func kakaoCellRow(name: String = "Fixture Friend💕", preview: String = "fixture nested old",
                           time: String = "오전 9:47", badge: String? = "2", y: CGFloat = 50,
                           profile: Bool = true, pinned: Bool = true, participants: String? = nil,

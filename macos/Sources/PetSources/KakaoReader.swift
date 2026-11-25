@@ -3,8 +3,11 @@ import AppKit
 import ApplicationServices
 import PetCore
 
-/// Bounded, in-memory accessibility data. Production captures only the KakaoTalk process.
-/// The public value model also allows synthetic parser tests without any Accessibility permission.
+// KakaoTalk 채팅 목록 리더: 손쉬운 사용(AX)으로 KakaoTalk 창을 읽고, 선택한 연락처의 행
+// (미리보기, 시간, 안 읽음 배지)을 미리보기 이벤트와 읽음 표시로 바꾼다.
+
+/// 크기가 제한된 메모리 속 손쉬운 사용 데이터. 실제로는 KakaoTalk 프로세스만 캡처한다.
+/// 공개 값 모델이라 손쉬운 사용 권한 없이도 합성 데이터로 파서를 테스트할 수 있다.
 public struct KakaoAXNode {
     public let role: String
     public let value: String?
@@ -32,8 +35,8 @@ public struct KakaoCaptureMetrics {
     public let deadlineExceeded: Bool
 }
 
-/// The chat-list preview is deliberately not treated as a complete message history.
-/// All state and calls belong to the app's serial I/O queue; this reader performs no AX actions.
+/// 채팅 목록 미리보기는 일부러 완전한 메시지 기록으로 취급하지 않는다.
+/// 모든 상태와 호출은 앱의 직렬 I/O 큐에서만 다룬다. 이 리더는 AX 동작(클릭 등)을 하지 않는다.
 public final class KakaoReader: LocalSourceReader {
     public let source = PetSource.kakao
     private struct Row {
@@ -74,7 +77,7 @@ public final class KakaoReader: LocalSourceReader {
 
     public func poll(now: Date = Date()) -> SourcePoll {
         guard let name, let conversation else { return SourcePoll(status: .disabled) }
-        // This outbox contains only our own canonical UTC timestamps; compare them directly.
+        // 이 outbox에는 우리가 만든 표준 UTC 타임스탬프만 있으므로 문자열로 바로 비교한다.
         let expiry = PetEvent.timestamp(now.addingTimeInterval(-12 * 60 * 60))
         outbox = outbox.filter { $0.value.observedAt >= expiry }
         switch capture() {
@@ -137,19 +140,19 @@ public final class KakaoReader: LocalSourceReader {
                                 badgeCandidate = (row.zeroSignature, row.unread, now)
                             }
                         } else {
-                            // A transient count drop must not turn its rebound into a new message.
+                            // 개수가 잠깐 줄었다가 다시 늘어도 새 메시지로 치면 안 된다.
                             badgeCandidate = nil
                         }
                     } else {
                         badgeCandidate = nil
-                        // Establish count-only evidence after two matching, complete observations.
-                        // Initial badge hydration is part of the baseline, never a notification.
+                        // 완전한 관측이 두 번 일치한 뒤에야 개수만으로 판단할 기준을 세운다.
+                        // 처음 배지가 채워지는 것은 기준선일 뿐 알림이 아니다.
                         badgeBaseline = old.row.zeroSignature == row.zeroSignature && old.row.unread == row.unread
                             ? (row.zeroSignature, row.unread) : nil
                     }
                 }
                 if let observation {
-                    // Hold the previous fingerprint at capacity so an acknowledgement can admit the latest preview.
+                    // 가득 차면 이전 상태를 유지해서, 확인 응답 뒤에 최신 미리보기를 받아들일 수 있게 한다.
                     guard outbox.count < 200 else { return batch(.observing) }
                     let event = PetEvent(eventId: "kakao-" + UUID().uuidString, sender: "local.kakao", displayName: "KakaoTalk",
                                          text: String(row.preview.prefix(2000)), threadUrl: conversation.key,
@@ -173,8 +176,8 @@ public final class KakaoReader: LocalSourceReader {
 
     private func interrupted(at now: Date) {
         zeroCandidate = nil; badgeCandidate = nil
-        // A brief AX timeout must not turn every successful retry into another launch baseline.
-        // Confirmation candidates never cross a failed capture; only the last complete row survives.
+        // 짧은 AX 시간 초과 때문에 성공한 재시도마다 기준선을 새로 잡으면 안 된다.
+        // 확인 후보는 실패한 캡처를 넘어가지 않는다. 마지막 완전한 행만 남는다.
         guard let lastSnapshotAt, (0...3).contains(now.timeIntervalSince(lastSnapshotAt)) else {
             gap()
             return
@@ -193,7 +196,7 @@ public final class KakaoReader: LocalSourceReader {
         text.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// A textual prefix alone is insufficient: suffixes may contain only real emoji graphemes.
+    /// 글자 접두사만으로는 부족하다: 접미사는 실제 이모지 문자만 허용한다.
     public static func nameMatches(_ candidate: String, configured: String) -> Bool {
         let value = normalize(candidate), wanted = normalize(configured)
         guard !wanted.isEmpty, value.hasPrefix(wanted) else { return false }
@@ -257,7 +260,7 @@ public final class KakaoReader: LocalSourceReader {
         findWindows(root)
         func leaves(_ node: KakaoAXNode) -> [KakaoAXNode] {
             if node.role == "AXStaticText" || node.role == "AXTextArea" { return [node] }
-            // Profile buttons and optional status/pin images have descriptions, not message bodies.
+            // 프로필 버튼과 선택적인 상태/고정 이미지에는 설명만 있고 메시지 본문은 없다.
             if node.role == "AXButton" || node.role == "AXImage" { return [] }
             return node.children.flatMap(leaves)
         }
@@ -268,7 +271,7 @@ public final class KakaoReader: LocalSourceReader {
         guard let rowFrame = valid(node.frame), area.insetBy(dx: -1, dy: -1).contains(rowFrame), rowFrame.width >= 160, rowFrame.height >= 35 else { return .invalid }
         let fields = leaves(node)
         guard (3...5).contains(fields.count), fields.allSatisfy({ field in
-            // Kakao's two-line text area extends four points below its 74-point row.
+            // Kakao의 두 줄 텍스트 영역은 74pt 행보다 4pt 아래로 삐져나온다.
             let bounds = rowFrame.insetBy(dx: -1, dy: field.role == "AXTextArea" ? -8 : -1)
             return plain(field) != nil && (valid(field.frame).map { bounds.contains($0) } ?? false)
         }) else { return .invalid }
@@ -280,7 +283,7 @@ public final class KakaoReader: LocalSourceReader {
         let names = fields.filter { plain($0).map { nameMatches($0, configured: name) } ?? false }
         guard names.count == 1, let nameField = names.first, let nameFrame = nameField.frame,
               nameFrame.minX < rowFrame.midX, nameFrame.midY < rowFrame.midY else { return .invalid }
-        // Group member counts sit beside the name, unlike the lower-right unread badge.
+        // 그룹 인원 수는 이름 옆에 있고, 안 읽음 배지는 오른쪽 아래에 있다.
         guard !fields.contains(where: { field in
             guard field.frame != nameFrame, field.role == "AXStaticText", let frame = field.frame,
                   let value = plain(field), value.range(of: "^[0-9]{1,5}$", options: .regularExpression) != nil else { return false }
@@ -319,7 +322,7 @@ public final class KakaoReader: LocalSourceReader {
         return .row(Row(preview: preview, time: time, clockTime: timeKind(time) == true, unread: unread, layout: layout))
     }
 
-    /// Relative elapsed labels change without a new message. Calendar labels never count as repeat evidence.
+    /// 경과 시간 표시는 새 메시지 없이도 바뀐다. 날짜 표시는 반복 메시지의 근거로 쓰지 않는다.
     private static func timeKind(_ value: String) -> Bool? {
         if value.range(of: "^(?:(?:오전|오후)\\s*(?:[1-9]|1[0-2])|(?:[01]?[0-9]|2[0-3])):[0-5][0-9]$", options: .regularExpression) != nil { return true }
         if ["오늘", "어제", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"].contains(value) { return false }
@@ -327,7 +330,7 @@ public final class KakaoReader: LocalSourceReader {
         return nil
     }
 
-    // MARK: KakaoTalk-only Accessibility adapter
+    // MARK: KakaoTalk 전용 손쉬운 사용(AX) 어댑터
 
     private enum CaptureFailure: Error { case unavailable }
     private final class AXCapture {
@@ -346,7 +349,7 @@ public final class KakaoReader: LocalSourceReader {
             var result: CFTypeRef?
             let code = AXUIElementCopyAttributeValue(element, name as CFString, &result)
             if code == .attributeUnsupported || code == .noValue { return nil }
-            // Kakao returns AXError.failure for absent optional descriptions, not just noValue.
+            // Kakao는 없는 선택적 설명에 noValue뿐 아니라 AXError.failure도 돌려준다.
             if optionalMetadata && code == .failure { return nil }
             guard code == .success else { throw CaptureFailure.unavailable }
             return result
@@ -362,7 +365,7 @@ public final class KakaoReader: LocalSourceReader {
             return string
         }
 
-        /// Read only shallow name fields in other rows; their previews cannot affect this contact.
+        /// 다른 행은 얕은 이름 필드만 읽는다. 그 행의 미리보기는 이 연락처에 영향을 줄 수 없다.
         func matchesName(_ element: AXUIElement, depth: Int = 0) throws -> Bool {
             count += 1
             guard count <= 500, depth <= 4, !names.isEmpty else { throw CaptureFailure.unavailable }
@@ -396,7 +399,7 @@ public final class KakaoReader: LocalSourceReader {
             var owner: pid_t = 0
             guard AXUIElementGetPid(element, &owner) == .success else { throw CaptureFailure.unavailable }
             if owner != pid {
-                // Embedded advertising can belong to WebKit's process. Never inspect that subtree.
+                // 내장 광고는 WebKit 프로세스 소속일 수 있다. 그 하위 트리는 절대 들여다보지 않는다.
                 guard !inList else { throw CaptureFailure.unavailable }
                 return KakaoAXNode(role: "AXExcluded")
             }

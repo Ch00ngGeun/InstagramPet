@@ -1,3 +1,5 @@
+// 앱 설정 동기화 검사: 앱 선택의 수동 설정 우선 적용, 수동 값 백업·복원,
+// 잘못된 응답 거부, 수동 저장과의 순차 처리, 대기 이벤트 정리.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../common.js');

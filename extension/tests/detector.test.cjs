@@ -1,3 +1,5 @@
+// 고정 예제와 실제 화면 모형으로 DOM 감지기와 Tracker를 검사한다: 기준선, 신원, 방향,
+// 미디어 라벨, 반복, 이전 기록 로드에서도 새로 받은 DM만 정확히 내보내야 한다.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
@@ -119,7 +121,7 @@ test('identical unkeyed history rows do not shift occurrence IDs into false new 
   const older=append(dom,{id:'',body:'Same old text',timestamp:''});dom.window.document.querySelector('#messages').prepend(older);
   assert.deepEqual(t.observe(snap(dom),['alice'],NOW+1000),[]);
 });
-// Live Korean-UI structure (2026-11-06): no role=row, IDs or <time>; sender comes from per-message action labels.
+// 실제 한국어 UI 구조(2026-11-06): role=row, ID, <time>이 없고 보낸 사람은 메시지별 동작 라벨에서 얻는다.
 function appendLive(dom, { user = 'fixture.sender', body = 'New live hello', extra = '' } = {}) {
   const doc = dom.window.document, row = doc.createElement('div');
   row.innerHTML = `<div role="group" tabindex="-1"><div><span dir="auto">Display Name</span></div><div>
@@ -160,7 +162,7 @@ test('live layout: column-reverse scroller is at bottom at scrollTop 0, not when
   list.scrollTop = 0; assert.equal(snap(dom, liveCfg).thread.atBottom, true);
   Object.defineProperty(list, 'scrollTop', { value: -800, configurable: true }); assert.equal(snap(dom, liveCfg).thread.atBottom, false);
 });
-// Media bodies modelled on the live probe (reel/post/emoji verified; image/video/story provisional).
+// 실제 프로브를 본뜬 미디어 본문. 2026-11-25 실제 화면에서 릴스·게시물·사진·동영상·스토리 구조를 모두 확인함.
 const MEDIA = {
   reel: n => `<div role="button"><img src="https://cdn.example/r${n}.jpg"><a href="/author.x/"><span dir="auto">author.x</span></a><svg aria-label="클립"></svg></div>`,
   post: n => `<div><img src="https://cdn.example/a.jpg"><a href="/author.x/"><span dir="auto">author.x</span></a></div><div role="button"><img src="https://cdn.example/p${n}.jpg"><span dir="auto">caption</span></div>`,
@@ -170,9 +172,12 @@ const MEDIA = {
   freshImage: n => `<div role="button"><img alt="" src="https://cdn.example/fi${n}.jpg"></div>`,
   freshVideo: n => `<div role="button"><span><img alt="" src="https://www.instagram.com/static/play.png"></span><img alt="" src="https://cdn.example/fv${n}.jpg"></div>`,
   story: n => `<div role="button"><a href="/stories/author.x/${n}/"><img src="https://cdn.example/s${n}.jpg"></a></div>`,
+  // 스크린샷처럼 .png로 보낸 사진: CDN의 .png는 재생 아이콘이 아니다.
+  pngImage: n => `<div role="button"><img alt="" src="https://cdn.example/shot${n}.png"></div>`,
+  pngVideo: n => `<div role="button"><span><img alt="" src="https://www.instagram.com/static/play.png"></span><img alt="" src="https://cdn.example/pv${n}.png"></div>`,
 };
 test('live layout: media and emoji-only messages get readable labels', () => {
-  const expected = { reel: '(릴스)', post: '(게시물)', image: '(이미지)', video: '(동영상)', story: '(스토리)', mixed: '(이미지) (동영상)', freshImage: '(이미지)', freshVideo: '(동영상)' };
+  const expected = { reel: '(릴스)', post: '(게시물)', image: '(이미지)', video: '(동영상)', story: '(스토리)', mixed: '(이미지) (동영상)', freshImage: '(이미지)', freshVideo: '(동영상)', pngImage: '(이미지)', pngVideo: '(동영상)' };
   for (const [type, html] of Object.entries(MEDIA)) {
     const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(); t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
     appendLive(dom, { body: '', extra: html(1) }); dom.window.document.querySelector('#messages > div:last-child span[dir="auto"]:not(a span)')?.remove();
@@ -237,7 +242,7 @@ test('live layout: the same reel or emoji sent again emits again; one tracker ne
   assert.equal(t.observe(snap(dom, liveCfg), allow, NOW + 6000).length, 2, 'two identical texts arriving together');
 });
 test('live layout: a repeat that arrives while Instagram drops the oldest row (20-row window) still emits', () => {
-  // This used to be swallowed: dropping the head renumbered the repeated content, so the new row looked old.
+  // 예전에는 여기서 누락됐다: 맨 위 행이 빠지며 반복 내용의 순번이 바뀌어 새 행이 옛 행처럼 보였다.
   const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'], list = dom.window.document.getElementById('messages');
   appendLive(dom, { body: 'same' }); t.observe(snap(dom, liveCfg), allow, NOW);
   list.firstElementChild.remove(); appendLive(dom, { body: 'same' });
@@ -247,14 +252,14 @@ test('live layout: a repeat that arrives while Instagram drops the oldest row (2
 test('live layout: identical history loaded above the old tail never emits', () => {
   const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'], list = dom.window.document.getElementById('messages');
   appendLive(dom, { body: 'same' }); t.observe(snap(dom, liveCfg), allow, NOW);
-  list.prepend(list.lastElementChild.cloneNode(true)); // scrolled-up history: same content, above the tail
+  list.prepend(list.lastElementChild.cloneNode(true)); // 위로 스크롤해 불러온 기록: 같은 내용이 끝 행 위에 붙는다
   assert.deepEqual(t.observe(snap(dom, liveCfg), allow, NOW + 1000), []);
 });
 test('live layout: the same text sent again later gets a new event ID, so dedup never drops it', () => {
   const dom = fixture('thread-live-2026-11', LIVE_URL), t = tracker(), allow = ['fixture.sender'], list = dom.window.document.getElementById('messages');
   t.observe(snap(dom, liveCfg), allow, NOW);
   appendLive(dom, { body: 'ㅋㅋ' }); const first = t.observe(snap(dom, liveCfg), allow, NOW + 1000);
-  list.firstElementChild.remove(); // the oldest row leaves Instagram's window
+  list.firstElementChild.remove(); // 가장 오래된 행이 Instagram 표시 범위에서 빠진다
   appendLive(dom, { body: 'ㅋㅋ' }); const second = t.observe(snap(dom, liveCfg), allow, NOW + 60000);
   assert.equal(first.length, 1); assert.equal(second.length, 1);
   assert.notEqual(first[0].eventId, second[0].eventId);
@@ -264,6 +269,6 @@ test('live layout: several messages found in one scan keep their on-screen order
   t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW);
   for (const body of ['first', 'second', 'third']) appendLive(dom, { body });
   const events = t.observe(snap(dom, liveCfg), ['fixture.sender'], NOW + 1000);
-  // The app sorts by observedAt with eventId (a hash) as tie-break, so times must be strictly increasing.
+  // 앱은 observedAt으로 정렬하고 같으면 eventId(해시)로 가르므로, 시각이 엄격히 증가해야 한다.
   assert.deepEqual([...events].sort((a, b) => a.observedAt.localeCompare(b.observedAt) || a.eventId.localeCompare(b.eventId)).map(e => e.text), ['first', 'second', 'third']);
 });

@@ -1,3 +1,4 @@
+// scripts/dom-probe.js 검사: DOM 구조만 출력하고 텍스트, 사용자 이름, ID, 클래스는 절대 내보내지 않는다.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');

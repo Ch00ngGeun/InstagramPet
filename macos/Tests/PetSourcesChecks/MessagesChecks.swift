@@ -4,6 +4,9 @@ import SQLite3
 import PetCore
 import PetSources
 
+// 임시 chat.db 픽스처로 MessagesReader 검사: 필터링, 본문 디코딩, 읽음
+// 워터마크, 재시작 복원, DB 교체, 잠금 처리.
+
 private final class MessagesFixture {
     let directory: URL
     var databaseURL: URL { directory.appendingPathComponent("chat.db") }

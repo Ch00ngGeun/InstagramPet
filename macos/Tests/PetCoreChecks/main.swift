@@ -2,6 +2,9 @@ import Foundation
 import Darwin
 import PetCore
 
+// PetCore 검사: sources.json 검증·저장·대화 연결, 이벤트 검증, 큐 중복 제거·
+// 용량·만료·읽음 표시·권한, 네이티브 메시징 프레임 처리.
+
 struct CheckFailure: Error, CustomStringConvertible {
     let description: String
     init(_ message: String) { description = message }
@@ -301,8 +304,14 @@ let checks: [(String, () throws -> Void)] = [
             try rejects { try queue.enqueue(expired) }
             try JSONEncoder().encode(expired).write(to: queue.paths.inbox.appendingPathComponent("old.json"))
             try Data("broken".utf8).write(to: queue.paths.inbox.appendingPathComponent("broken.json"))
+            // 이름만 .json인 폴더와 그 안의 파일은 손상 파일로 오인해 지우면 안 된다.
+            let folder = queue.paths.inbox.appendingPathComponent("folder.json", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            try Data("keep".utf8).write(to: folder.appendingPathComponent("inside.txt"))
             try check(queue.pending().isEmpty)
             try check(queue.count() == 0)
+            try queue.clear()
+            try check(FileManager.default.fileExists(atPath: folder.appendingPathComponent("inside.txt").path))
         }
     }),
     ("Symlink data directories are refused", {
@@ -313,7 +322,7 @@ let checks: [(String, () throws -> Void)] = [
     }),
     ("Queue ordering compares ISO8601 instants across UTC offsets", {
         try isolatedQueue { queue in
-            // Both observations must be fresh; use a fixed offset rendering of now minus 1 second.
+            // 두 관측 모두 최신이어야 하므로, 지금보다 1초 전 시각을 고정 오프셋으로 표기해 쓴다.
             let olderDate = Date().addingTimeInterval(-1)
             let formatter = ISO8601DateFormatter()
             formatter.timeZone = TimeZone(secondsFromGMT: 9 * 3600)

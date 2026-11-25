@@ -1,5 +1,6 @@
 #!/bin/bash
-# Per-user installation for stable Google Chrome. No sudo, daemon, login item or network port.
+# 정식 Google Chrome용 사용자 단위 설치. sudo·데몬·로그인 항목·네트워크 포트를 쓰지 않는다.
+# 실행: scripts/install.sh <확장 프로그램 ID>. dist/가 없으면 먼저 빌드한다.
 set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 EXTENSION_ID="${1:-}"
@@ -10,7 +11,7 @@ fi
 if [[ ! -x "$PROJECT_DIR/dist/PetNativeHost" || ! -d "$PROJECT_DIR/dist/InstagramPet.app" ]]; then
     "$PROJECT_DIR/scripts/build-app.sh"
 fi
-# Python is supplied by Apple Command Line Tools, which are also required for Swift compilation.
+# Python은 Apple Command Line Tools에 포함되며, Swift 컴파일에도 어차피 필요하다.
 python3 - "$PROJECT_DIR" "$EXTENSION_ID" <<'PY'
 import json, os, pathlib, re, shutil, sys, tempfile
 project = pathlib.Path(sys.argv[1]).resolve()
@@ -44,7 +45,7 @@ for directory in (support, support / 'bin', support / 'inbox', support / 'receip
     private_dir(directory)
 apps.mkdir(parents=True, exist_ok=True)
 manifest_dir.mkdir(parents=True, exist_ok=True)
-# Replace only this project's known app path. Quit the pet before updating it.
+# 이 프로젝트의 알려진 앱 경로만 교체한다. 업데이트 전에 펫을 종료할 것.
 if app.is_symlink():
     raise SystemExit('Refusing symbolic-link app destination: ' + str(app))
 if app.exists():
@@ -57,7 +58,7 @@ if app.exists():
     shutil.rmtree(app)
 shutil.copytree(project / 'dist/InstagramPet.app', app)
 host = support / 'bin/PetNativeHost'
-# Atomic binary replacement also avoids following an existing symlink.
+# 원자적으로 바이너리를 교체하므로 기존 심볼릭 링크를 따라가지도 않는다.
 fd, staged = tempfile.mkstemp(prefix='.host-', dir=str(host.parent))
 os.close(fd)
 shutil.copy2(project / 'dist/PetNativeHost', staged)

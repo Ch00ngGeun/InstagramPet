@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Test the actual Swift executable over Chrome's framed stdin/stdout. No account/GUI needed."""
+"""실제 Swift 실행 파일을 Chrome 방식의 프레임 stdin/stdout으로 시험한다. 계정이나 GUI가 필요 없다.
+
+실행: python3 scripts/test-native.py [PetNativeHost 경로, 기본값 dist/PetNativeHost]
+"""
 import datetime
 import hashlib
 import json
@@ -14,7 +17,7 @@ import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
 HOST = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else PROJECT / 'dist/PetNativeHost'
-# unittest must not interpret the optional executable path as a test selector.
+# 선택 인자인 실행 파일 경로를 unittest가 테스트 선택자로 해석하지 않게 한다.
 sys.argv = sys.argv[:1]
 EXTENSION_ID = 'a' * 32
 ORIGIN = 'chrome-extension://' + EXTENSION_ID + '/'
@@ -160,8 +163,8 @@ class NativeBridgeTests(unittest.TestCase):
             if process.poll() is None: process.kill(); process.communicate(timeout=5)
 
     def test_long_connection_memory_stays_flat(self):
-        # Chrome keeps one connection open for days and syncs config every 5 s; the host once kept
-        # two 8KB read buffers per request (1.4GB after 5 days).
+        # Chrome은 연결 하나를 며칠씩 열어 두고 5초마다 설정을 동기화한다. 예전 호스트는 요청마다
+        # 8KB 읽기 버퍼 2개를 남겨 두었다(5일 뒤 1.4GB).
         import re
         process = subprocess.Popen([str(HOST), ORIGIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, env=self.env)
@@ -177,7 +180,7 @@ class NativeBridgeTests(unittest.TestCase):
             requests(500)
             before = footprint()
             requests(3000)
-            # Leaking build: +47MB over these 3000 requests.
+            # 누수가 있던 빌드: 이 3000번 요청에 +47MB.
             self.assertLess(footprint() - before, 5)
         finally:
             process.kill(); process.communicate(timeout=5)
@@ -202,7 +205,7 @@ class NativeBridgeTests(unittest.TestCase):
         self.assertNotIn(b'PRIVATE_CANARY', result.stderr)
         self.assertEqual(stat.S_IMODE(files[0].stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((self.root / 'inbox').stat().st_mode), 0o700)
-        files[0].unlink()  # simulate the UI acknowledging display
+        files[0].unlink()  # UI가 표시를 확인한 것처럼 흉내 낸다
         replay = self.run_host(frame(self.event()))
         self.assertEqual(unpack(replay.stdout)[0]['type'], 'ack')
         self.assertEqual(len(list((self.root / 'inbox').glob('*.json'))), 0)
@@ -230,7 +233,7 @@ class NativeBridgeTests(unittest.TestCase):
         self.assertNotIn(b'PRIVATE_CANARY', result.stdout)
 
     def test_invalid_json_recovers_on_next_frame(self):
-        malformed = b'{'  # valid framing, invalid JSON
+        malformed = b'{'  # 프레임은 올바르지만 JSON은 잘못됨
         result = self.run_host(struct.pack('=I', len(malformed)) + malformed + frame({'version': 1, 'type': 'ping'}))
         self.assertEqual(result.returncode, 0)
         self.assertEqual([x['type'] for x in unpack(result.stdout)], ['error', 'pong'])
@@ -264,7 +267,7 @@ class NativeBridgeTests(unittest.TestCase):
                 self.assertFalse((self.root / 'inbox').exists() and list((self.root / 'inbox').glob('*.json')))
 
     def test_fragmented_pipe_writes(self):
-        # Feed header and UTF-8 body through many writes; the receiver must read exact frame sizes.
+        # 헤더와 UTF-8 본문을 여러 번에 나눠 쓴다. 수신 측은 프레임 크기만큼 정확히 읽어야 한다.
         process = subprocess.Popen([str(HOST), ORIGIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, env=self.env)
         payload = frame(self.event())

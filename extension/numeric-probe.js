@@ -1,7 +1,9 @@
+// scripts/manage-chrome-observation.py가 쓰는 숫자 진단 프로브의 옵션 페이지 쪽:
+// 개수만 답하고 탭 URL, 제목, 선택 값은 절대 내보내지 않는다.
 (() => {
   'use strict';
-  // Apple Events JavaScript runs outside the privileged extension world. Only this
-  // options page bridges its two explicit diagnostic commands through the DOM.
+  // Apple Events JavaScript는 권한 있는 확장 영역 밖에서 실행된다. 이 옵션 페이지만
+  // 명시된 진단 명령 두 개를 DOM을 통해 중계한다.
   let busy = false;
   const root = document.documentElement;
   root.addEventListener('pet-numeric-probe', async () => {

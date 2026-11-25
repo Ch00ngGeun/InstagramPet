@@ -1,10 +1,12 @@
+// 탭 유지 검사: 관찰 중인 DM 탭만 자동 정리에서 제외되고, 워커가 다시 시작돼도
+// 원래 값이 복원된다. 등록된 대화방마다 고정된 탭이 있고, 탭이 계속 늘어나지 않는다.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 globalThis.PetCommon = require('../common.js');
 const { TabRetention } = require('../tab-retention.js');
 
 function fixture() {
-  const settings = { enabled: true, allowedSenders: ['fixture.sender'] }, session = {}, updates = [];
+  const settings = { enabled: true, allowedSenders: ['fixture.sender'] }, session = {}, updates = [], created = [], windows = [5];
   const tabs = new Map([
     [1, { id: 1, url: 'https://www.instagram.com/direct/t/fixture/', autoDiscardable: true }],
     [2, { id: 2, url: 'https://www.instagram.com/fixture.sender/', autoDiscardable: true }],
@@ -17,10 +19,11 @@ function fixture() {
     } }, tabs: {
       query: async () => [...tabs.values()].filter(tab => new URL(tab.url).hostname === 'www.instagram.com'),
       get: async id => { if (!tabs.has(id)) throw new Error('Closed'); return { ...tabs.get(id) }; },
-      update: async (id, change) => { updates.push([id, change]); Object.assign(tabs.get(id), change); }
-    }
+      update: async (id, change) => { updates.push([id, change]); Object.assign(tabs.get(id), change); },
+      create: async props => { const id = 100 + tabs.size; tabs.set(id, { id, autoDiscardable: true, ...props }); created.push(props); return { id }; }
+    }, windows: { getAll: async () => windows.map(id => ({ id })) }
   };
-  return { chrome, settings, session, updates, tabs, retention: new TabRetention(chrome) };
+  return { chrome, settings, session, updates, created, windows, tabs, retention: new TabRetention(chrome) };
 }
 
 test('only allowlisted observation-enabled Instagram DM tabs are protected from automatic discard', async () => {
@@ -62,4 +65,37 @@ test('ordinary updates do not loop and a completed DM navigation is protected wi
   f.tabs.delete(2);
   await f.retention.removed(2);
   assert.deepEqual(f.session.petRetainedTabs, []);
+});
+
+test('each bound thread keeps one pinned tab: an open one is pinned, a missing one opens in the background', async () => {
+  const f = fixture();
+  f.settings.bindings = { fixture: 'fixture.sender', '42': 'second.sender' };
+  await f.retention.ensurePinned();
+  assert.deepEqual(f.updates, [[1, { pinned: true }]]);
+  assert.deepEqual(f.created, [{ windowId: 5, url: 'https://www.instagram.com/direct/t/42/', active: false, pinned: true }]);
+  await f.retention.ensurePinned();
+  assert.equal(f.updates.length, 1); assert.equal(f.created.length, 1);
+});
+
+test('a tab we opened that redirects is not reopened every minute; it reopens only after it is closed', async () => {
+  const f = fixture();
+  f.settings.bindings = { '42': 'second.sender' };
+  await f.retention.ensurePinned();
+  const opened = f.session.petOpenedTabs['42'];
+  f.tabs.get(opened).url = 'https://www.instagram.com/accounts/login/';
+  await f.retention.ensurePinned();
+  assert.equal(f.created.length, 1);
+  f.tabs.delete(opened);
+  await f.retention.ensurePinned();
+  assert.equal(f.created.length, 2);
+});
+
+test('nothing opens while observation is off, without bound threads, or when Chrome has no window', async () => {
+  const f = fixture();
+  await f.retention.ensurePinned();
+  f.settings.bindings = { '42': 'second.sender' }; f.settings.enabled = false;
+  await f.retention.ensurePinned();
+  f.settings.enabled = true; f.windows.length = 0;
+  await f.retention.ensurePinned();
+  assert.equal(f.created.length, 0); assert.equal(f.updates.length, 0);
 });

@@ -1,3 +1,5 @@
+// MV3 서비스 워커: 네이티브 호스트 연결을 소유하고, 콘텐츠·UI 메시지를 대기열과 설정 동기화로 보내며,
+// DM 탭이 자동으로 버려지지 않게 하고 고정된 DM 탭을 유지하며, 다시 불러온 뒤 콘텐츠 스크립트를 다시 주입한다.
 importScripts("common.js", "worker-core.js", "tab-retention.js", "config-sync.js");
 "use strict";
 const HOST = "com.instagrampet.bridge";
@@ -30,7 +32,7 @@ function nativeRequest(message) {
       timeout = setTimeout(() => {
         const connection = port; port = null;
         complete(new Error("Native host timed out"));
-        try { connection?.disconnect(); } catch { /* Already closed. */ }
+        try { connection?.disconnect(); } catch { /* 이미 닫혔다. */ }
       }, 8000);
       port.postMessage(message);
     } catch (error) { complete(error); port = null; }
@@ -65,7 +67,7 @@ async function handle(message, sender) {
       return answer;
     }
     if (message.type === "pet.read") {
-      // Only the thread the sending tab is actually showing can be marked read.
+      // 보낸 탭이 실제로 띄우고 있는 스레드만 읽음으로 표시할 수 있다.
       const thread = PetCommon.threadURL(message.threadUrl), here = PetCommon.threadURL(sender.url);
       if (!thread || !here || thread.url !== here.url) throw new Error("Read requires its own thread page");
       await queue.exclusive(() => nativeRequest({ version: 1, type: "read", threadUrl: thread.url }));
@@ -106,11 +108,11 @@ async function handle(message, sender) {
 }
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handle(message, sender).then(sendResponse).catch(error => sendResponse({ ok: false, error: PetCommon.clip(error.message, 250) }));
-  return true; // Keep the callback channel open, including Chrome before Promise responses.
+  return true; // 콜백 채널을 열어 둔다. Promise 응답을 지원하기 전 Chrome도 포함.
 });
 function ensureAlarm() { chrome.alarms.create("pet-retry", { periodInMinutes: 1 }); }
 function refreshAppConfig() { return appConfig.sync().then(() => queue.flush()).catch(() => {}); }
-// A reload orphans content scripts in already-open tabs; re-inject so they keep observing without a tab refresh.
+// 다시 불러오면 이미 열린 탭의 콘텐츠 스크립트가 끊긴다. 탭 새로고침 없이 계속 관찰하도록 다시 주입한다.
 async function reinject() {
   const { js, matches } = chrome.runtime.getManifest().content_scripts[0];
   for (const tab of await chrome.tabs.query({ url: matches }))
@@ -118,12 +120,12 @@ async function reinject() {
 }
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   ensureAlarm(); refreshAppConfig();
-  tabRetention.refresh().catch(() => {});
-  if (reason === "install" || reason === "update") reinject().catch(() => {}); // chrome_update: declared scripts are still alive
+  tabRetention.refresh().catch(() => {}); tabRetention.ensurePinned().catch(() => {});
+  if (reason === "install" || reason === "update") reinject().catch(() => {}); // chrome_update: 선언된 스크립트가 아직 살아 있다
 });
-chrome.runtime.onStartup.addListener(() => { ensureAlarm(); refreshAppConfig(); tabRetention.refresh().catch(() => {}); });
-// Clicking a pet bubble opens the thread in a new tab. If that thread is already open, switch to the
-// existing tab instead: a second copy of the same thread would show repeated messages twice.
+chrome.runtime.onStartup.addListener(() => { ensureAlarm(); refreshAppConfig(); tabRetention.refresh().catch(() => {}); tabRetention.ensurePinned().catch(() => {}); });
+// 펫 말풍선을 누르면 스레드가 새 탭에서 열린다. 그 스레드가 이미 열려 있으면 기존 탭으로 전환한다:
+// 같은 스레드가 두 개 열리면 반복 메시지가 두 번 보인다.
 const freshTabs = new Map();
 chrome.tabs.onCreated.addListener(tab => { freshTabs.set(tab.id, Date.now()); });
 chrome.tabs.onRemoved.addListener(tabId => { freshTabs.delete(tabId); tabRetention.removed(tabId).catch(() => {}); });
@@ -140,7 +142,8 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     await chrome.tabs.remove(tabId);
   }).catch(() => {});
 });
-chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "pet-retry") refreshAppConfig(); });
+// 1분마다: 설정 동기화, 그리고 고정된 DM 탭이 닫혔으면 다시 연다.
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "pet-retry") { refreshAppConfig(); tabRetention.ensurePinned().catch(() => {}); } });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.settings) {
     queue.flush().catch(() => {});
@@ -150,5 +153,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
 ensureAlarm();
 tabRetention.refresh().catch(() => {});
 refreshAppConfig();
-// The existing native port keeps this worker alive; the alarm also recovers after suspension.
+// 열린 네이티브 연결이 이 워커를 살려 두고, 중단된 뒤에는 알람이 다시 살린다.
 setInterval(() => { appConfig.sync().catch(() => {}); }, 5000);

@@ -2,6 +2,8 @@ import AppKit
 import PetCore
 import PetSources
 
+// 소스 설정 창 열기·저장, 바뀐 소스의 리더 교체, 선택한 대화만 받는 필터, 상태 표시 갱신.
+
 extension PetController {
     @objc func openSettings() {
         if let settingsWindow, settingsWindow.window?.isVisible == true { settingsWindow.show(); return }
@@ -26,10 +28,10 @@ extension PetController {
         }
     }
 
-    /// Called on the main thread. The I/O queue serializes file replacement and reader changes with polls.
+    /// 메인 스레드에서 호출한다. I/O 큐가 파일 교체와 리더 변경을 폴링과 차례대로 처리한다.
     func saveSettings(_ value: SourcesConfig, completion: @escaping (Result<Void, SettingsFormError>) -> Void) {
         let previous = sourceConfig
-        queueGeneration += 1 // Ignore a poll snapshot captured with the old selection.
+        queueGeneration += 1 // 예전 선택으로 찍은 폴링 결과는 무시한다.
         io.async { [weak self] in
             guard let self else { return }
             do {
@@ -41,8 +43,8 @@ extension PetController {
                     return self.makeContactReaders(reader.source, config: config, reusing: reader as? ContactReaders)
                 }
                 self.lastSourcesPoll = .distantPast
-                // Receipts and per-conversation read marks survive a selection change.
-                // If cleanup cannot run now, the display boundary rejects obsolete queued selections later.
+                // 받은 기록과 대화별 읽음 표시는 선택이 바뀌어도 남는다.
+                // 지금 정리하지 못하면, 더 이상 선택되지 않은 대기 이벤트는 나중에 화면에 띄우기 직전에 걸러진다.
                 if let waiting = try? self.queue?.pending() {
                     for event in waiting where changed.contains(event.source) && !Self.acceptsEvent(event, config: config) {
                         try? self.queue?.consume(event)
@@ -100,7 +102,7 @@ extension PetController {
         if event.kind == "test" { return true }
         switch event.source {
         case .instagram:
-            guard config.instagram != nil else { return true } // Legacy extension-managed selection.
+            guard config.instagram != nil else { return true } // 예전처럼 확장 프로그램이 선택을 관리하는 경우.
             guard let url = URL(string: event.threadUrl) else { return false }
             let path = url.path.split(separator: "/").map(String.init)
             return config.instagramSelections.contains { $0.username == event.sender && path == ["direct", "t", $0.threadId] }

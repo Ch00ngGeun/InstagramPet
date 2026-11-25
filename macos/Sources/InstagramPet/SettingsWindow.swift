@@ -2,11 +2,13 @@ import AppKit
 import PetCore
 import PetSources
 
+// 소스 설정 창: 입력 초안 검증(SettingsDraft)과 폼 창 컨트롤러.
+
 struct SettingsFormError: Error {
     let message: String
 }
 
-/// A draft never changes the user's file until every enabled source is valid.
+/// 켜진 소스가 모두 올바르기 전까지 초안은 사용자 파일을 바꾸지 않는다.
 struct SettingsDraft {
     var managesInstagram: Bool
     var username: String
@@ -26,7 +28,7 @@ struct SettingsDraft {
         var config = SourcesConfig()
         if managesInstagram {
             do {
-                // A pasted full DM address counts as its thread number.
+                // 붙여 넣은 DM 전체 주소는 그 대화 번호로 친다.
                 let ids = threadId.replacingOccurrences(of: #"[^\s,]*/direct/t/([0-9]+)[^\s,]*"#, with: "$1", options: .regularExpression)
                 config.instagram = try SourcesConfig(instagram: .init(username: username, threadId: ids)).validated().instagram
             } catch {
@@ -158,7 +160,7 @@ final class SourcesSettingsWindowController: NSWindowController, NSTextFieldDele
 
     func controlTextDidChange(_ notification: Notification) {
         if let field = notification.object as? NSTextField, field === username || field === threadId {
-            // Preserve legacy extension-only selection until these fields are deliberately edited.
+            // 이 칸들을 일부러 고치기 전까지는 예전의 확장 프로그램 전용 선택을 유지한다.
             managesInstagram = true
         }
     }
@@ -169,7 +171,7 @@ final class SourcesSettingsWindowController: NSWindowController, NSTextFieldDele
         errorLabel.isHidden = message.isEmpty
     }
 
-    /// Also used by the offscreen form smoke test; errors never include entered values.
+    /// 화면 밖 폼 smoke 테스트에서도 쓴다. 오류 메시지에 입력값을 넣지 않는다.
     @objc func save() {
         let value: SourcesConfig
         do { value = try draft.validated() }

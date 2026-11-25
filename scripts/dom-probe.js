@@ -1,6 +1,6 @@
-// Paste into the DevTools console of an open Instagram 1:1 DM thread (or inbox).
-// Prints a structure-only skeleton: no text, usernames, IDs, classes, URLs or images.
-// Review the output before sharing. See docs/DOM-DRIFT.md.
+// 열려 있는 Instagram 1:1 DM 대화(또는 받은 메시지함)의 DevTools 콘솔에 붙여 넣어 실행한다.
+// 구조 골격만 출력한다: 본문, 사용자 이름, ID, 클래스, URL, 이미지는 없다.
+// 공유하기 전에 출력을 직접 확인할 것. docs/DOM-DRIFT.md 참고.
 (() => {
   const IN = /^(?:message from|message sent by|sent by|보낸 사람|메시지를 보낸 사람)/i;
   const OUT = /^(?:you(?: sent|:)|(?:message )?sent by you|message from you|내가 보낸|회원님이 보낸|나:)/i;
@@ -29,7 +29,7 @@
   function skel(el, depth) {
     if (depth > 60) return "…";
     let wraps = 0;
-    // Collapse attribute-less single-child wrappers that Instagram nests deeply.
+    // Instagram이 깊게 중첩하는, 속성 없고 자식이 하나뿐인 래퍼 div를 접는다.
     while (el.children.length === 1 && el.childNodes.length === 1 && !attrs(el) && el.tagName === "DIV") { el = el.children[0]; wraps++; }
     const tag = el.tagName.toLowerCase();
     if (["svg", "script", "style", "template"].includes(tag)) return `<${tag}/>`;
@@ -42,7 +42,7 @@
     if (!r.width) return "?";
     return r.left - s.left > s.right - r.right + 40 ? "R" : r.right - s.left < s.width / 2 + 40 ? "L" : "C";
   }
-  // The message list is usually the tallest scrollable element in the main area.
+  // 메시지 목록은 보통 main 영역에서 가장 높은 스크롤 요소다.
   const scroller = [...scope.querySelectorAll("*")].filter(e => e.scrollHeight > e.clientHeight + 50)
     .sort((a, b) => b.scrollHeight - a.scrollHeight)[0] || scope;
   let list = scroller;
@@ -55,7 +55,7 @@
     `last ${rows.length} children of message list (side: L=left R=right C=center):`,
     ...rows.map((r, i) => `--- row ${i + 1} side=${side(r)}\n${skel(r, 0)}`)
   ].join("\n").slice(0, 40000);
-  try { copy(report); console.log("Copied to clipboard. Review before sharing."); } catch { /* copy() exists only in DevTools */ }
+  try { copy(report); console.log("Copied to clipboard. Review before sharing."); } catch { /* copy()는 DevTools에만 있다 */ }
   console.log(report);
   return report;
 })();

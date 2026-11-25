@@ -2,8 +2,10 @@ import AppKit
 import PetCore
 import PetSources
 
+// 큐와 로컬 리더 폴링, 읽음 표시 반영, 어떤 메시지를 말풍선으로 띄울지 결정.
+
 extension PetController {
-    /// Off the main thread. Reader outboxes are acknowledged only after durable queue acceptance.
+    /// 메인 스레드 밖에서 실행한다. 리더가 넘긴 이벤트는 큐에 안전하게 저장된 뒤에만 확인 처리한다.
     func pollSnapshot() throws -> (ReaderStatuses?, [PetEvent], [ConversationKey: Date]) {
         var waiting = try queue.pending(), marks = try queue.reads()
         let statuses = try pollLocalSources(waiting: &waiting, marks: &marks)
@@ -33,7 +35,7 @@ extension PetController {
                     marks[key] = max(marks[key] ?? .distantPast, at)
                     waiting.removeAll { $0.conversation.isRead(observedAt: $0.observedAt, in: marks) }
                 } catch {
-                    // markRead may commit its watermark before an inbox deletion fails.
+                    // markRead는 받은 함 삭제가 실패하기 전에 워터마크를 먼저 기록했을 수 있다.
                     if let recovered = try? queue.reads() {
                         for (key, at) in recovered { marks[key] = max(marks[key] ?? .distantPast, at) }
                         waiting.removeAll { $0.conversation.isRead(observedAt: $0.observedAt, in: marks) }
@@ -41,13 +43,13 @@ extension PetController {
                     readFailed = true; break
                 }
             }
-            if readFailed { continue } // A failed write is retried by this reader, without stopping others.
+            if readFailed { continue } // 실패한 쓰기는 다른 리더를 멈추지 않고 이 리더가 다시 시도한다.
             var accepted = Set<String>()
             for event in batch.events {
                 let expired = PetEvent.date(event.observedAt).map { now.timeIntervalSince($0) > EventQueue.retention } ?? true
                 if !expired && !event.conversation.isRead(observedAt: event.observedAt, in: marks) {
                     do { if try queue.enqueue(event) { waiting.append(event) } }
-                    catch { break } // Acknowledge the accepted prefix; this reader retries the rest on any write failure.
+                    catch { break } // 받아들인 앞부분만 확인 처리한다. 쓰기가 실패하면 이 리더가 나머지를 다시 시도한다.
                 }
                 accepted.insert(event.identity)
             }
@@ -73,8 +75,8 @@ extension PetController {
                 ? "시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근에서 설치된 InstagramPet.app을 추가하고 켜 주세요. 메시지와 카카오톡 개별 알림 DB를 읽기 전용으로 확인하며 과거 이력은 재생하지 않습니다. 권한을 켠 뒤 앱을 다시 열어 주세요."
                 : "시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용에서 InstagramPet.app을 켜 주세요. 설정한 카카오톡 채팅 목록의 미리보기만 읽습니다. 카카오톡 앱과 목록 창이 있어야 합니다."
             alert.addButton(withTitle: "확인")
-            // One notice per source per launch. No permission is granted by the app itself.
-            // In front: a modal alert hidden behind other windows silently freezes the pet until dismissed.
+            // 소스마다 실행당 한 번만 안내한다. 앱이 스스로 권한을 주지는 않는다.
+            // 맨 앞에 띄운다: 다른 창 뒤에 가려진 모달 알림은 닫을 때까지 펫을 조용히 멈춰 세운다.
             NSApp.activate(ignoringOtherApps: true)
             alert.window.level = .statusBar + 1
             alert.runModal()
@@ -84,7 +86,6 @@ extension PetController {
     func poll() {
         guard queue != nil, !pollInFlight else { return }
         pruneExpiredMemory()
-        // Leave excess events on disk rather than silently dropping them from memory.
         pollInFlight = true
         let generation = queueGeneration
         io.async { [weak self] in
@@ -107,9 +108,10 @@ extension PetController {
                             self.io.async { [weak self] in try? self?.queue?.consume(event) }
                             continue
                         }
+                        // 넘치는 이벤트는 메모리에서 조용히 버리지 않고 디스크에 남겨 둔다.
                         guard self.pending.count < 100 else { break }
                         if self.knownIDs.contains(event.identity) { continue }
-                        // Validate again at the display boundary, including the URL.
+                        // 화면에 띄우기 직전에 URL까지 다시 검증한다.
                         guard (try? event.validate()) != nil else { continue }
                         self.knownIDs.insert(event.identity)
                         self.knownOrder.append(event.identity)
@@ -120,8 +122,8 @@ extension PetController {
                         return a == b ? $0.identity < $1.identity : a < b
                     }
                     self.trimKnownIDs()
-                    // A new message always shows: it ends any timed hide (bubbles or pet) right away.
-                    // A pet tucked behind its arrow stays tucked: only the bubbles come back.
+                    // 새 메시지는 늘 보인다: 시간제 숨기기(말풍선이든 펫이든)를 바로 끝낸다.
+                    // 화살표 뒤로 집어넣은 펫은 그대로 두고 말풍선만 돌아온다.
                     if !self.pending.isEmpty {
                         if self.isHidden { self.showNow() } else if self.paused { self.resumeBubbles() }
                     }
@@ -135,7 +137,7 @@ extension PetController {
         }
     }
 
-    /// Seen in Chrome (or opened from a bubble): that thread's bubbles disappear.
+    /// Chrome에서 봤거나 말풍선으로 연 대화: 그 대화의 말풍선은 사라진다.
     func isRead(_ event: PetEvent) -> Bool {
         event.conversation.isRead(observedAt: event.observedAt, in: readMarks)
     }
@@ -153,7 +155,7 @@ extension PetController {
         if let shown = current, isRead(shown) { current = recent.popLast() }
         let still = recent + [current].compactMap { $0 }
         guard !bubble.isHidden, still.map(\.identity) != before else { return }
-        // Other threads' bubbles stay; if nothing is left, the queue moves on or goes quiet.
+        // 다른 대화의 말풍선은 남는다. 남은 게 없으면 대기열이 다음으로 넘어가거나 조용해진다.
         if still.isEmpty { dismissCurrent() } else { bubble.show(still) }
         updateStatus()
     }
@@ -168,11 +170,11 @@ extension PetController {
 
     func presentNextIfPossible() {
         guard !paused, !isHidden else { return }
-        // Existing unread bubbles never delay a new arrival. Keep the latest five together.
+        // 이미 떠 있는 안 읽은 말풍선이 새 메시지를 늦추지 않는다. 최신 메시지들을 함께 보여 준다(앱당 4개, 모두 12개).
         while !pending.isEmpty { present(pending.removeFirst()) }
     }
 
-    /// Delivery can be delayed independently per source; newest means observedAt, not arrival order.
+    /// 소스마다 전달이 따로 늦을 수 있으므로, 최신은 도착 순서가 아니라 observedAt 기준이다.
     func rememberForDisplay(_ event: PetEvent) -> [PetEvent] {
         let previous = (recent + [current].compactMap { $0 }).filter { $0.identity != event.identity && $0.kind != "test" }
         let ordered = Orbit.capped((previous + [event]).sorted {
@@ -187,7 +189,7 @@ extension PetController {
         guard !paused, !isHidden else { return }
         bubble.show(rememberForDisplay(event))
         layoutOverlay(animated: false)
-        // Retain undisplayed events on disk across app quits. Consume only on display.
+        // 아직 안 띄운 이벤트는 앱을 꺼도 디스크에 남긴다. 띄울 때만 소비한다.
         io.async { [weak self] in
             guard let queue = self?.queue else { return }
             try? queue.consume(event)
@@ -207,12 +209,12 @@ extension PetController {
 
     @objc func dismissCurrent() {
         bubble.isHidden = true; cat.excited = false
-        // With a backlog the bubbles shift in place: the newest one enters on the right.
+        // 밀린 메시지가 있으면 말풍선이 제자리에서 밀려나고, 가장 새 것이 오른쪽으로 들어온다.
         presentNextIfPossible()
     }
 
     func toggleLatest() {
-        if bubble.isHidden { showLatest() } // a click never closes bubbles; only hiding does
+        if bubble.isHidden { showLatest() } // 클릭으로는 말풍선을 닫지 않는다. 숨기기로만 닫는다
     }
 
     @objc func showLatest() {
@@ -229,7 +231,7 @@ extension PetController {
     }
 
     func demoEvent(text: String = "안녕! 새 DM이 오면 이렇게 알려줄게요.\nDrag me anywhere. Keep Instagram open in Chrome.", minutesAgo: Int = 0) -> PetEvent? {
-        // Decode the same wire model to exercise the bubble without requiring Chrome or a login.
+        // 같은 전송 형식을 디코드해서, Chrome이나 로그인 없이도 말풍선을 시험한다.
         let sample: [String: Any] = [
             "version": 1, "type": "dm", "eventId": "demo-\(UUID().uuidString)",
             "sender": "demo.pet", "displayName": "Demo Pet", "text": text,
@@ -257,7 +259,7 @@ extension PetController {
         if let current { knownIDs.insert(current.identity) }
     }
 
-    /// Shown bubbles expire on their own only after 12 hours.
+    /// 떠 있는 말풍선은 12시간이 지나야 저절로 사라진다.
     static let bubbleLifetime: TimeInterval = 12 * 60 * 60
 
     private func pruneExpiredMemory() {

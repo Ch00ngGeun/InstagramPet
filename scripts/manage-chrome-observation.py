@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Check target policy/DM state or reload this project's extension; numeric output only.
+"""대상 정책/DM 탭 상태를 확인하거나, 이 프로젝트의 확장 프로그램을 다시 로드하거나, Chrome을 재시작한다. 출력은 숫자뿐이다.
 
-Existing tabs are never navigated. Temporary policy/options tabs are closed again.
-The extension ID comes only from the local bridge config and is never printed.
+실행: python3 scripts/manage-chrome-observation.py policy|tabs|reload|restart
+
+기존 탭은 절대 이동시키지 않는다. 임시로 연 정책/옵션 탭은 다시 닫는다.
+확장 프로그램 ID는 로컬 브리지 설정에서만 읽고 출력하지 않는다.
 """
 import argparse
 import json
@@ -76,8 +78,8 @@ POLICY = r'''(() => {
   const tables = [...scope.querySelectorAll('policy-table')];
   for (const table of tables) {
     const rows = [...(table.shadowRoot?.querySelectorAll('policy-row') || [])];
-    // Apple Events uses an isolated world: custom-element JavaScript properties
-    // are unavailable there, but the rendered shadow DOM is shared.
+    // Apple Events는 격리된 실행 환경(isolated world)에서 돌아 커스텀 요소의 JavaScript 속성은
+    // 쓸 수 없지만, 렌더링된 shadow DOM은 공유된다.
     const row = rows.find(r => r.shadowRoot?.querySelector('#name')?.textContent?.trim()
       === 'IntensiveWakeUpThrottlingEnabled');
     if (!row) continue;

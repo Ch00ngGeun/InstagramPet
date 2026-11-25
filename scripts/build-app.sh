@@ -1,4 +1,6 @@
 #!/bin/bash
+# Swift 패키지를 release로 빌드해 dist/InstagramPet.app과 dist/PetNativeHost를 만들고 둘 다 codesign한다.
+# 실행: scripts/build-app.sh. prepare-local-signing.sh로 만든 서명 ID가 있으면 쓰고, 없으면 ad-hoc(-) 서명.
 set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SIGNING_CONFIG="${INSTAGRAMPET_SIGN_CONFIG:-$HOME/Library/Application Support/InstagramPet/signing.plist}"

@@ -2,6 +2,9 @@ import Foundation
 import PetCore
 import PetSources
 
+// ContactReaders 검사: 연락처별 순서, 격리, 리더 재사용, 상태 합산,
+// 모호한 KakaoTalk 이름 별칭.
+
 private final class ContactFixtureReader: LocalSourceReader {
     let source: PetSource
     let conversation: ConversationKey

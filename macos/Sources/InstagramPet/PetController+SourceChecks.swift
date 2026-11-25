@@ -2,8 +2,10 @@ import AppKit
 import PetCore
 import PetSources
 
+// 소스 관련 자체 점검: 카카오톡 손쉬운 사용 측정, 가짜 메시지 생성, 읽음 제거·큐 실패·큐 용량 점검.
+
 extension PetController {
-    /// Deliberately numeric-only. Runs the production reader with this app's signing identity.
+    /// 일부러 숫자만 출력한다. 이 앱의 서명으로 실제 리더를 돌린다.
     func measureLiveAccessibility() {
         guard let config = try? SourcesConfig.load(paths: paths) else { print("[0]"); return }
         var captures: [KakaoCaptureMetrics] = [], polls: [Double] = []
@@ -39,7 +41,7 @@ extension PetController {
         if let data = try? JSONSerialization.data(withJSONObject: report), let output = String(data: data, encoding: .utf8) { print(output) }
     }
 
-    /// Fake contacts only. Reused event IDs across sources exercise the source-qualified UI identity.
+    /// 가짜 연락처만 쓴다. 소스끼리 같은 이벤트 ID를 써서, 소스까지 포함한 화면 식별자를 시험한다.
     func fullSourceEvents(_ counts: (Int, Int, Int)) -> [PetEvent] {
         let plan: [(PetSource, Int)] = [(.kakao, counts.0), (.instagram, counts.1), (.messages, counts.2)]
         let texts = ["보고 싶다 ❤️", "ㅋㅋㅋ", "(릴스)", "오늘 저녁에 뭐 먹을래?", "자기가 결정해용", "(이미지)", "응응"]
@@ -74,7 +76,7 @@ extension PetController {
         }
     }
 
-    /// Exercise real read removal and queue backpressure with synthetic sources in the isolated test home.
+    /// 격리된 시험용 홈에서 가짜 소스로 실제 읽음 제거와, 큐가 찼을 때 받기를 미루는 동작을 시험한다.
     func checkSourceReads(to output: URL) {
         buildPanel()
         buildMenu()
@@ -102,9 +104,9 @@ extension PetController {
         }
         let distinct = Set(events.map(\.identity)).count == events.count
         let previousMarks = readMarks
-        applyReads([:]) // an older in-flight disk snapshot cannot undo a click/read watermark
+        applyReads([:]) // 늦게 도착한 예전 디스크 결과가 클릭·읽음 워터마크를 되돌리지 못한다
         let monotonicReads = readMarks == previousMarks
-        // A delayed, older Instagram delivery joins at the oldest end (Instagram has room) and evicts none of the others.
+        // 늦게 온 더 오래된 인스타그램 메시지는 가장 오래된 쪽에 끼고(인스타그램 자리가 남음) 다른 것을 밀어내지 않는다.
         recent = Array(events.dropLast()); current = events.last
         let delayed = PetEvent(eventId: "late-old", sender: "fixture.sender", text: "synthetic",
             threadUrl: events[0].threadUrl, observedAt: PetEvent.timestamp(Date().addingTimeInterval(-3600)), kind: "thread-message")
@@ -125,7 +127,7 @@ extension PetController {
         } catch { fputs("Could not save source read smoke report\n", stderr) }
     }
 
-    /// Actual queue failures with fake readers; never opens a user's source database.
+    /// 가짜 리더로 실제 큐 실패를 시험한다. 사용자의 소스 데이터베이스는 절대 열지 않는다.
     func checkSourceFailures(to output: URL) {
         final class FixtureReader: LocalSourceReader {
             let source: PetSource
@@ -186,7 +188,7 @@ extension PetController {
     }
 
     private func checkSourceCapacity() -> Bool {
-        // Never use the user's queue when a smoke flag is invoked without an isolated home.
+        // 격리된 홈 없이 smoke 플래그로 실행되면 사용자의 큐는 절대 쓰지 않는다.
         let resolved = paths.root.resolvingSymlinksInPath().path
         let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path
         guard ProcessInfo.processInfo.environment["INSTAGRAMPET_HOME"] != nil,

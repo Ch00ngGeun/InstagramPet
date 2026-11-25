@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare a user-scoped macOS Chrome timer policy; never installs it automatically."""
+"""사용자 범위 macOS Chrome 타이머 정책 프로필을 만든다. 자동으로 설치하지는 않는다.
+
+실행: python3 scripts/create-chrome-timer-profile.py [--check] [--output PATH]
+"""
 import argparse
 import ctypes
 import json
@@ -32,7 +35,7 @@ def profile():
 
 
 def check():
-    """Only this public policy key is read; never dumps browser preferences."""
+    """이 공개 정책 키 하나만 읽는다. 브라우저 환경설정을 통째로 덤프하지 않는다."""
     cf = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
     pointer = ctypes.c_void_p
     cf.CFStringCreateWithCString.argtypes = [pointer, ctypes.c_char_p, ctypes.c_uint32]

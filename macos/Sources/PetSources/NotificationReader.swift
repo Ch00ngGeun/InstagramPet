@@ -4,9 +4,12 @@ import SQLite3
 import CryptoKit
 import PetCore
 
-/// Optional local fallback for individually delivered KakaoTalk notifications.
-/// This is an undocumented OS database, so unsupported/masked payloads leave AX as the fallback.
-/// Confined to the app's I/O queue. Never writes the source database or logs notification data.
+// KakaoTalk 알림 DB 리더, 폴링마다 공유하는 DB 세션, 그리고 알림과 손쉬운 사용(AX) 채팅 목록
+// 대체 경로를 짝지어 주는 통합 리더.
+
+/// 개별로 전달된 KakaoTalk 알림을 읽는 선택적 로컬 경로.
+/// 문서화되지 않은 OS DB라서, 지원하지 않거나 가려진 내용이면 AX가 대체 경로로 남는다.
+/// 앱의 I/O 큐 안에서만 쓴다. 원본 DB에 쓰거나 알림 내용을 로그에 남기지 않는다.
 public final class KakaoNotificationReader: LocalSourceReader {
     public let source = PetSource.kakao
     public static var defaultDatabaseURL: URL {
@@ -34,7 +37,7 @@ public final class KakaoNotificationReader: LocalSourceReader {
         let delivered: Double
     }
     private struct Waiting { let event: PetEvent; let at: Date }
-    /// Only canonical-message digests are retained; delivery/presentation metadata is not a new message.
+    /// 표준화한 메시지의 다이제스트만 보관한다. 전달/표시 메타데이터 변경은 새 메시지가 아니다.
     private struct MessageState { let digest: String; let at: Date }
     fileprivate enum Failure: Error { case permission, unavailable, busy }
     fileprivate static let bundle = "com.kakao.kakaotalkmac"
@@ -94,7 +97,7 @@ public final class KakaoNotificationReader: LocalSourceReader {
                     return batch(.observing)
                 }
 
-                // A bounded retry outbox stops cursor advancement rather than dropping a burst.
+                // 재시도 outbox가 한도에 차면 몰려온 메시지를 버리지 않고 커서 전진을 멈춘다.
                 let room = Self.capacity - outbox.count
                 if room > 0 {
                     let fresh = try snapshot.rows(selection: "r.rec_id > ? AND r.rec_id <= ?", integers: [cursor, maximum.0], revision: nil, limit: min(room, Self.pageSize))
@@ -115,7 +118,7 @@ public final class KakaoNotificationReader: LocalSourceReader {
                         guard try receive(row, name: name, conversation: conversation, now: now) else { break }
                         next = Revision(date: row.revised, row: row.id)
                     }
-                    // Do not skip the unprocessed remainder when the outbox becomes full.
+                    // outbox가 가득 차면 처리 못 한 나머지를 건너뛰지 않는다.
                     if updates.count < Self.pageSize && outbox.count < Self.capacity { next = maximum.1 }
                     revision = next
                 }
@@ -138,7 +141,7 @@ public final class KakaoNotificationReader: LocalSourceReader {
         return SourcePoll(events: events, status: status)
     }
 
-    /// Returns false only for backpressure. Malformed and unrelated notifications advance the cursor.
+    /// outbox가 가득 찼을 때만 false를 돌려준다. 잘못됐거나 무관한 알림은 커서를 전진시킨다.
     private func receive(_ row: Row, name: String, conversation: ConversationKey, now: Date) throws -> Bool {
         guard let baselineAt, let file else { return true }
         let time = max(row.requested, max(row.revised, row.delivered))
@@ -152,13 +155,13 @@ public final class KakaoNotificationReader: LocalSourceReader {
               let title = request["titl"] as? String, title.count <= 200, KakaoReader.nameMatches(title, configured: name),
               let body = request["body"] as? String, !body.contains("\0"),
               !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
-        // A nonempty subtitle may be a group-room name. Never infer a 1:1 contact from it.
+        // 부제목이 비어 있지 않으면 그룹방 이름일 수 있다. 여기서 1:1 연락처를 추정하지 않는다.
         if let subtitle = request["subt"] {
             guard let value = subtitle as? String, value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
         }
-        // A row can be rewritten when macOS delivers or presents an existing notification.
-        // Keep only the last meaningful state per record, so A→B→A remains three arrivals while
-        // unchanged text with revised delivery dates/raw plist metadata remains one arrival.
+        // macOS가 기존 알림을 전달하거나 표시할 때 행이 다시 쓰일 수 있다.
+        // 레코드마다 마지막 의미 있는 상태만 기억해서, A→B→A는 세 번 도착으로 보고
+        // 전달 날짜/plist 메타데이터만 바뀐 같은 내용은 한 번 도착으로 본다.
         let recordMaterial = "\(file.device):\(file.inode):\(file.birthSeconds):\(file.birthNanoseconds):\(row.id):" + row.uuid.base64EncodedString()
         let record = SHA256.hash(data: Data(recordMaterial.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
         var canonical = Data()
@@ -190,7 +193,7 @@ public final class KakaoNotificationReader: LocalSourceReader {
     }
 }
 
-/// One short-lived read-only session per contact-group poll. Reader cursors/outboxes remain independent.
+/// 연락처 묶음 폴링마다 짧게 쓰는 읽기 전용 세션 하나. 리더별 커서/outbox는 따로 유지된다.
 final class KakaoNotificationDatabase {
     fileprivate typealias FileIdentity = KakaoNotificationReader.FileIdentity
     fileprivate typealias Revision = KakaoNotificationReader.Revision
@@ -275,9 +278,9 @@ final class KakaoNotificationDatabase {
 
         func rows(selection: String, integers: [Int64], revision: (Revision, Revision)?, limit: Int) throws -> [Row] {
             let query = Query(selection: selection, integers: integers, lower: revision?.0, upper: revision?.1)
-            // Read one full page so contacts with different free outbox space still reuse the same rows.
+            // 한 페이지를 통째로 읽어서, outbox 여유가 다른 연락처들도 같은 행을 재사용하게 한다.
             let result = rowCache[query] ?? Result { try readRows(selection: selection, integers: integers, revision: revision, limit: Self.pageSize) }
-            // Different contact backlogs may request different ranges; keep retained raw data bounded.
+            // 연락처마다 밀린 양이 달라 다른 범위를 요청할 수 있으니, 보관하는 원본 데이터 양을 제한한다.
             if rowCache.count < 4 { rowCache[query] = result }
             return Array(try result.get().prefix(limit))
         }
@@ -350,8 +353,8 @@ final class KakaoNotificationDatabase {
     }
 }
 
-/// Notifications carry individual messages; AX remains the read-state and missing-notification fallback.
-/// Both underlying retry outboxes are acknowledged only on durable app acceptance or a paired duplicate.
+/// 알림은 개별 메시지를 담는다. AX는 읽음 상태와 알림이 없을 때의 대체 경로로 남는다.
+/// 양쪽 재시도 outbox는 앱이 확실히 받았거나 짝지어진 중복일 때만 확인 처리된다.
 public final class KakaoCombinedReader: LocalSourceReader {
     public let source = PetSource.kakao
     public private(set) var notificationStatus = SourceStatus.disabled
@@ -414,7 +417,7 @@ public final class KakaoCombinedReader: LocalSourceReader {
         var suppressNotifications = Set<String>(), suppressAX = Set<String>()
         for event in notificationBatch.events where recentNotifications[event.identity] == nil {
             let fingerprint = Fingerprint(event)
-            // A genuinely newer notification must not be acknowledged as an older AX fallback.
+            // 정말로 더 새 알림을 더 오래된 AX 대체 메시지의 중복으로 확인 처리하면 안 된다.
             let latePair = releasedAX.filter {
                 !$0.value.paired && fingerprint.date <= $0.value.fingerprint.date
                     && Self.sameMessage($0.value.fingerprint, fingerprint)
@@ -428,8 +431,8 @@ public final class KakaoCombinedReader: LocalSourceReader {
         }
         notifications.acknowledge(suppressNotifications)
         for event in axBatch.events {
-            // A retry already released to the app can pair only with a newly arriving notification
-            // in the late-pair path above, never with an unused older burst notification.
+            // 이미 앱에 내보낸 재시도는 위의 늦은 짝짓기 경로에서 새로 도착한 알림과만 짝지을 수 있고,
+            // 한꺼번에 왔던 더 오래된 미사용 알림과는 짝짓지 않는다.
             if releasedAX[event.identity] != nil { continue }
             let fingerprint = Fingerprint(event)
             if heldAX[event.identity] == nil {

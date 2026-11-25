@@ -1,6 +1,9 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+// 패키지 구성: 공통 코어, 로컬 메시지 리더, Chrome 네이티브 메시징 호스트, 펫 앱,
+// 그리고 검사 실행 파일 두 개(직접 실행하며 XCTest 타깃은 없음).
+
 let package = Package(
     name: "InstagramPet",
     platforms: [.macOS(.v13)],

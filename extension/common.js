@@ -1,4 +1,4 @@
-/* Shared by the isolated content world, options, service worker and fixture tests. */
+/* 격리된 콘텐츠 스크립트, 옵션 페이지, 서비스 워커, 테스트가 함께 쓰는 공통 함수. */
 (function (root) {
   "use strict";
   const DEFAULTS = Object.freeze({
@@ -35,7 +35,7 @@
     }
     return result;
   }
-  // Two independent 32-bit hashes: deterministic observation identities, not a security primitive.
+  // 독립된 32비트 해시 두 개: 관찰 식별용 결정적 값일 뿐, 보안용이 아니다.
   function hash(value) {
     let a = 2166136261, b = 0x9e3779b9;
     for (const c of String(value)) {

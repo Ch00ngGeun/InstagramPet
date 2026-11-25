@@ -1,3 +1,5 @@
+// 전달 대기열 검사: 이벤트 검증, 중복 제거, 재시도·만료(TTL), 크기 초과 처리,
+// 호스트 거부, 테스트 이벤트 처리.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { BridgeQueue, validateEvent, PENDING_TTL } = require('../worker-core.js');

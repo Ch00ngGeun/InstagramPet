@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Synthetic queue or notification SQLite -> AppKit measurements. Output contains numbers only."""
+"""합성 메시지를 큐 또는 알림 SQLite로 넣어 AppKit 표시까지 걸린 시간을 잰다. 출력은 숫자뿐이다.
+
+실행: python3 scripts/benchmark-delivery.py [--source queue|notifications] [--messages N] [--length N]
+(빌드된 dist/가 필요하다. test-app.py가 호출한다.)
+"""
 import argparse
 import datetime
 import json
@@ -50,7 +54,7 @@ def measure(count=5, length=1000):
 
 
 def measure_notifications(count=5, length=1000):
-    """Use an isolated WAL fixture and the app's real notification-reader delivery path."""
+    """격리된 WAL 픽스처와 앱의 실제 알림 리더 전달 경로를 사용한다."""
     with tempfile.TemporaryDirectory(prefix='InstagramPet-notification-benchmark-') as directory:
         root = Path(directory)
         root.joinpath('config.json').write_text(json.dumps({
@@ -77,7 +81,7 @@ def measure_notifications(count=5, length=1000):
                 '--smoke-notification-latency', str(report), str(count)
             ], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # Inject only after the actual reader has baselined the empty database.
+            # 실제 리더가 빈 데이터베이스로 기준점을 잡은 뒤에만 넣는다.
             deadline = time.monotonic() + 10
             while True:
                 if ready.exists() and ready.read_text().strip() == '1':
@@ -92,7 +96,7 @@ def measure_notifications(count=5, length=1000):
                 'app': 'com.kakao.KakaoTalkMac',
                 'req': {'titl': 'Fixture Friend', 'body': 'x' * length}
             }, fmt=plistlib.FMT_BINARY)
-            # Apple's notification dates are seconds since 2001-01-01 UTC.
+            # Apple 알림 시각은 2001-01-01 UTC 기준 초 단위다.
             for _ in range(count):
                 observed = time.time() - 978307200
                 writer.execute('''

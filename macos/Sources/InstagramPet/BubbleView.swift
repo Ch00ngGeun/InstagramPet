@@ -2,21 +2,21 @@ import AppKit
 import PetCore
 import PetSources
 
-/// One soft white slime blob with a thin source-coloured rim. It flattens at a screen edge or neighbour,
-/// and stretches and jiggles when it moves. Idle blobs stay still.
+/// 얇은 소스 색 테두리를 두른 부드러운 흰 슬라임 하나. 화면 가장자리나 이웃에 닿으면 납작해지고,
+/// 움직일 때 늘어나며 출렁인다. 가만히 있는 슬라임은 움직이지 않는다.
 final class BubbleView: NSView {
     static let font = NSFont.systemFont(ofSize: 14)
     static let timeFont = NSFont.systemFont(ofSize: 10)
-    /// Slime shapes (wrap width, line limit): natural, wider and flatter, narrower and taller. Text always fits.
+    /// 슬라임 모양(줄바꿈 폭, 최대 줄 수): 기본, 넓고 납작한 모양, 좁고 높은 모양. 글자는 늘 들어간다.
     static let shapes: [(wrap: CGFloat, lines: Int)] = [(150, 4), (210, 3), (110, 6)]
     static let pad: CGFloat = 24
-    // Text sits in the ellipse's inscribed box, which is 1/sqrt(2) of the ellipse.
+    // 글자는 타원에 내접하는 상자 안에 놓이며, 그 상자는 타원의 1/sqrt(2)다.
     static let inscribe: CGFloat = 1.42
-    /// `margin`: drawing room around the body for the bulge, stretch and soft shadow.
-    /// `tailRoom` < 0: neighbours' bodies overlap by 2×6pt and flatten against each other, sticking together.
-    /// The text box is the ellipse's inscribed box, so this flattening never reaches the text.
+    /// `margin`: 몸 둘레에 부풀음·늘어남·부드러운 그림자를 그릴 여유.
+    /// `tailRoom` < 0: 이웃의 몸이 2×6pt 겹치며 서로 납작하게 붙는다.
+    /// 글상자는 타원의 내접 상자라서 이렇게 납작해져도 글자까지 닿지 않는다.
     static let margin: CGFloat = 70, tailRoom: CGFloat = -6
-    /// The drawn blob bulges past its body, so a blob resting against an edge or neighbour flattens there.
+    /// 그려지는 슬라임은 몸보다 부풀어 있어서, 가장자리나 이웃에 기대면 그쪽이 납작해진다.
     static let bulge: CGFloat = 1.07
     private static let clock: DateFormatter = { let f = DateFormatter(); f.locale = Locale(identifier: "ko_KR"); f.dateFormat = "a h:mm"; return f }()
     private let messageField = NSTextField(wrappingLabelWithString: "")
@@ -24,17 +24,17 @@ final class BubbleView: NSView {
     private(set) var event: PetEvent?
     private var wobble: [CGFloat] = Array(repeating: 0, count: 32)
     private var velocity = NSPoint.zero
-    // Count invalidation requests, including offscreen views whose AppKit dirty flag is cleared immediately.
+    // 다시 그리기 요청 횟수를 센다. AppKit이 표시를 바로 지우는 화면 밖 뷰도 포함한다.
     private(set) var redrawRequests = 0
     override var needsDisplay: Bool {
         get { super.needsDisplay }
         set { if newValue { redrawRequests += 1 }; super.needsDisplay = newValue }
     }
     var onClick: ((PetEvent) -> Void)?
-    /// Solver output: the footprint rect (body + tailRoom) in superview coordinates, and the shape.
+    /// 배치 계산 결과: 상위 뷰 좌표의 footprint 사각형(몸 + tailRoom)과 모양.
     var goal = NSRect.zero
     var shape = 0 { didSet { messageField.maximumNumberOfLines = Self.shapes[shape].lines; needsLayout = true } }
-    /// Screen edges and neighbours, in superview coordinates.
+    /// 상위 뷰 좌표의 화면 가장자리와 이웃 벽.
     var walls: [Wall] = [] { didSet { if walls != oldValue { needsDisplay = true } } }
 
     override init(frame frameRect: NSRect) {
@@ -56,13 +56,13 @@ final class BubbleView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    // Rendering is intentionally bounded. The entire event never enters a log.
+    // 표시 길이는 일부러 제한한다. 이벤트 전체가 로그에 남는 일은 없다.
     static func message(_ event: PetEvent) -> String { String(event.text.prefix(360)) }
     static func time(_ event: PetEvent) -> String { PetEvent.date(event.observedAt).map { clock.string(from: $0) } ?? "" }
 
     static func bodySize(for event: PetEvent, shape: Int) -> NSSize {
         let (wrap, lines) = shapes[shape]
-        // Labels pad their text by a few points, so measure narrower than the field will be.
+        // 라벨은 글자 둘레에 몇 pt 여백을 두므로, 실제 칸보다 좁게 잰다.
         let text = (message(event) as NSString).boundingRect(with: NSSize(width: wrap - 8, height: 2000), options: [.usesLineFragmentOrigin], attributes: [.font: font]).size
         let time = (time(event) as NSString).size(withAttributes: [.font: timeFont])
         let line = ceil(NSLayoutManager().defaultLineHeight(for: font))
@@ -90,7 +90,7 @@ final class BubbleView: NSView {
         .messages: [NSColor(calibratedRed: 52.0 / 255, green: 199.0 / 255, blue: 89.0 / 255, alpha: 1)]
     ]
 
-    /// AppKit's CGPath property requires macOS 14; keep this renderer compatible with macOS 13.
+    /// AppKit의 cgPath 속성은 macOS 14부터라서, 이 렌더러는 macOS 13과도 호환되게 둔다.
     private static func outline(_ path: NSBezierPath) -> CGPath {
         if #available(macOS 14.0, *) { return path.cgPath }
         let result = CGMutablePath()
@@ -101,7 +101,7 @@ final class BubbleView: NSView {
             case .lineTo: result.addLine(to: points[0])
             case .curveTo: result.addCurve(to: points[2], control1: points[0], control2: points[1])
             case .closePath: result.closeSubpath()
-            default: break // quadratic elements are available only on macOS 14+ above
+            default: break // quadratic 요소는 macOS 14 이상에서만 나오며, 그 경우는 위에서 처리했다
             }
         }
         return result
@@ -123,7 +123,7 @@ final class BubbleView: NSView {
         path.stroke()
         NSGraphicsContext.restoreGraphicsState()
 
-        // Clip the gradient to the rim so the message surface remains white.
+        // 그라데이션을 테두리에만 잘라 넣어 메시지 면은 흰색으로 남긴다.
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         context.saveGState()
         context.addPath(Self.outline(path))
@@ -157,19 +157,19 @@ final class BubbleView: NSView {
         needsLayout = true; needsDisplay = true
     }
 
-    /// The footprint where the blob is right now (equal to `goal` at rest).
+    /// 지금 슬라임이 있는 footprint(멈춰 있으면 `goal`과 같다).
     var footprintNow: NSRect { frame.insetBy(dx: Self.margin - Self.tailRoom, dy: Self.margin - Self.tailRoom) }
 
-    /// A collision push: moves now and feeds the jelly, so a shoved blob squashes and wobbles.
+    /// 충돌로 밀기: 바로 옮기고 출렁임에도 반영해서, 밀린 슬라임이 찌그러지며 흔들린다.
     func shove(_ push: NSPoint) {
-        // Subpixel round-off at flush contacts must not keep a resting spring and redraws alive.
+        // 딱 붙은 접촉에서 생기는 1pt 미만 반올림 오차가 멈춘 스프링과 다시 그리기를 계속 살려 두면 안 된다.
         guard max(abs(push.x), abs(push.y)) > 0.0001 else { return }
         frame = frame.offsetBy(dx: push.x, dy: push.y)
         velocity = NSPoint(x: velocity.x + push.x * 0.5, y: velocity.y + push.y * 0.5)
         needsDisplay = true
     }
 
-    /// A damped spring toward the solver's goal: it lags (satellite), overshoots a little and settles (jelly).
+    /// 배치 목표를 향한 감쇠 스프링: 뒤따라오다(위성) 살짝 지나쳤다가 멈춘다(젤리).
     func step(animated: Bool) {
         let target = goal.insetBy(dx: Self.tailRoom - Self.margin, dy: Self.tailRoom - Self.margin)
         let previousFrame = frame, previousVelocity = velocity, previousAlpha = alphaValue

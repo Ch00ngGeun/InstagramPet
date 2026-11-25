@@ -1,3 +1,5 @@
+/* 네이티브 호스트에서 펫 앱의 Instagram 선택을 받아 사용자의 수동 설정 위에 적용한다.
+   수동 설정은 따로 보관해 두었다가 앱 관리가 꺼지면 되돌린다. */
 (function (root) {
   "use strict";
   const C = root.PetCommon || require("./common.js");
@@ -19,14 +21,14 @@
   }
 
   function instagram(value) {
-    if (value === null) return null; // No app override; keep manual settings.
+    if (value === null) return null; // 앱 지정 없음: 수동 설정을 유지한다.
     if (!value || typeof value !== "object" || Array.isArray(value)
         || Object.keys(value).sort().join(",") !== "threadId,username"
         || typeof value.username !== "string" || typeof value.threadId !== "string") throw new Error("Invalid app Instagram configuration");
     const { username, threadId } = value;
     if (!username && !threadId) return { username: "", threadId: "" };
-    // The host supplies canonical CSV, with one thread for each username in the same order.
-    // Validate every item before replacing any part of the effective selection.
+    // 호스트는 정규화된 CSV를 주며, 사용자 이름마다 같은 순서로 스레드가 하나씩 대응한다.
+    // 실제 적용 중인 선택을 조금이라도 바꾸기 전에 모든 항목을 검증한다.
     if (username.length > 3099 || threadId.length > 12899) throw new Error("Invalid app Instagram configuration");
     const usernames = username.split(","), threads = threadId.split(",");
     if (usernames.length > 100 || usernames.length !== threads.length
@@ -76,13 +78,13 @@
       if (this.running) return this.running;
       const job = this.exclusive(async () => {
         try {
-          // The host returns only the Instagram selection. Never persist its raw response.
+          // 호스트는 Instagram 선택만 돌려준다. 원본 응답은 절대 저장하지 않는다.
           const app = replyConfig(await this.nativeRequest({ version: 1, type: "config" }));
           const data = await this.get(["settings", "manualSettings", "appInstagram", "appConfigSync", "pending"]);
           const manual = C.settings(data.manualSettings || data.settings);
           const desired = effective(manual, app), changes = {};
-          // Preserve the original editable selection before replacing any effective values.
-          // If this write fails, the active selection is never touched.
+          // 적용 값을 바꾸기 전에 편집 가능한 원래 선택부터 보존한다.
+          // 이 쓰기가 실패하면 현재 적용 중인 선택은 건드리지 않는다.
           if (app !== null && !data.manualSettings) await this.set({ manualSettings: manual });
           if (!equal(data.settings, desired)) changes.settings = desired;
           dropObsoletePending(data, desired, changes, this.now());
@@ -93,12 +95,12 @@
           if (Object.keys(changes).length) await this.set(changes);
           return { ok: true, ...summary({ ...data, ...changes }) };
         } catch {
-          // A missing/old host or invalid response leaves the last valid selection untouched.
+          // 호스트가 없거나 오래됐거나 응답이 잘못되면 마지막 유효 선택을 그대로 둔다.
           let data = {};
           try {
             data = await this.get(["appInstagram", "appConfigSync"]);
             if (data.appConfigSync?.state !== "unavailable") await this.set({ appConfigSync: { state: "unavailable", at: this.now() } });
-          } catch { /* Storage failures must not echo provider messages or configuration values. */ }
+          } catch { /* 저장소 오류가 제공자 메시지나 설정 값을 그대로 노출하면 안 된다. */ }
           return { ok: false, ...summary({ ...data, appConfigSync: { state: "unavailable" } }), error: "App settings could not be refreshed" };
         }
       });

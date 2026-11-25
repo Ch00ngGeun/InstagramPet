@@ -3,6 +3,9 @@ import Darwin
 import PetCore
 import PetSources
 
+// PetSources 검사 묶음(Messages, KakaoTalk AX, KakaoTalk 알림, 여러 연락처)을 모두
+// 합성 픽스처로 실행하고, 하나라도 실패하면 0이 아닌 코드로 끝낸다.
+
 setbuf(stdout, nil)
 
 struct SourceCheckFailure: Error, CustomStringConvertible {

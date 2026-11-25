@@ -2,6 +2,8 @@ import AppKit
 import PetCore
 import PetSources
 
+// --render-preview / --render-scenarios용 가짜 데스크톱 렌더링과 --smoke-test 결과 보고.
+
 extension PetController {
     final class Desk: NSView {
         override func draw(_ dirtyRect: NSRect) {
@@ -10,14 +12,14 @@ extension PetController {
         }
     }
 
-    /// Renders the pet and five bubbles on a fake 1440×900 desktop with the cat at `catOrigin`.
     private enum DeskMode { case normal, mixed, mixedRead, bubblesHidden, petHidden, moving, pushing, tucked, crowded, squashRight, squashBottom, headRight, headUp, waistRight, bagRight, handLeft, headDown, feetUp, bagLeft, rightFoot, shoulder, knee, bottomContact, topContact, leftContact, rightContact, bottomDeepPull, topDeepPull, leftDeepPull, rightDeepPull }
 
+    /// 가짜 1440×900 데스크톱에 펫과 말풍선(기본 예시 5개, 또는 `fullDesk` 개수)을 펫이 `catOrigin`에 있게 그린다.
     private func renderDesk(catOrigin: NSPoint, mode: DeskMode, to output: URL) {
         let screen = NSRect(x: 0, y: 0, width: 1440, height: 900), area = screen
         let desk = Desk(frame: screen)
         desk.appearance = NSAppearance(named: .aqua)
-        // `catOrigin` is in the old 200×390 layout (sprite at +32.65, +4); place the sprite at the same spot.
+        // `catOrigin`은 예전 200×390 배치 기준(스프라이트 +32.65, +4)이므로 스프라이트를 같은 곳에 놓는다.
         cat = CatView(frame: NSRect(origin: .zero, size: CatView.size))
         let spriteAt = { (o: NSPoint) in NSPoint(x: o.x + 32.65 - self.cat.spriteRect.minX, y: o.y + 4 - self.cat.spriteRect.minY) }
         cat.setFrameOrigin(spriteAt(catOrigin))
@@ -67,15 +69,15 @@ extension PetController {
         }
         place(pet: cat.bodyRect.offsetBy(dx: cat.frame.minX, dy: cat.frame.minY), area: area, animated: false)
         if mode == .crowded {
-            // Long messages crowded into a corner while the pet is dragged down into it.
+            // 펫을 모서리로 끌어내리는 동안 그 모서리에 몰린 긴 메시지들.
             for _ in 1...6 {
                 cat.setFrameOrigin(NSPoint(x: cat.frame.minX - 25, y: cat.frame.minY - 25))
                 cat.shake(by: NSPoint(x: -25, y: -25))
                 place(pet: cat.bodyRect.offsetBy(dx: cat.frame.minX, dy: cat.frame.minY), area: area, animated: true)
             }
         }
-        // A few ticks into a fast drag, held at a given height (0 feet … 1 head): the far parts trail behind.
-        // Pushing: a very fast drag left, straight into the left bubble, which must be shoved, not passed through.
+        // 빠르게 끄는 중 몇 틱 뒤, 주어진 높이(0 발 … 1 머리)를 잡은 상태: 먼 부분은 뒤처진다.
+        // 밀기: 왼쪽으로 아주 빠르게 끌어 왼쪽 말풍선에 곧장 부딪치면, 통과하지 않고 밀어내야 한다.
         let drags: [DeskMode: (step: NSPoint, held: CGFloat, side: CGFloat)] = [
             .moving: (NSPoint(x: 28, y: 0), 0.03, 0), .pushing: (NSPoint(x: -60, y: 0), 0.03, 0),
             .headRight: (NSPoint(x: 30, y: 0), 0.9, 0), .headUp: (NSPoint(x: 0, y: 30), 0.9, 0), .waistRight: (NSPoint(x: 30, y: 0), 0.5, 0),
@@ -88,7 +90,7 @@ extension PetController {
                 let moved = NSPoint(x: catOrigin.x + CGFloat(tick) * drag.step.x, y: catOrigin.y + CGFloat(tick) * drag.step.y)
                 cat.setFrameOrigin(spriteAt(moved))
                 cat.shake(by: drag.step)
-                cat.setPull(NSPoint(x: drag.step.x * 1.5, y: drag.step.y * 1.5)) // the pointer 45pt ahead of the body
+                cat.setPull(NSPoint(x: drag.step.x * 1.5, y: drag.step.y * 1.5)) // 포인터는 몸보다 1.5틱 앞(30pt씩이면 45pt)
                 place(pet: cat.bodyRect.offsetBy(dx: cat.frame.minX, dy: cat.frame.minY), area: area, animated: true)
             }
         }
@@ -157,7 +159,7 @@ extension PetController {
         for (name, origin, mode) in scenarios {
             renderDesk(catOrigin: origin, mode: mode, to: directory.appendingPathComponent("\(name).png"))
         }
-        // Per-app cap: Kakao 1 + Messages 1 + seven Instagram keeps 1 + 1 + 4.
+        // 앱별 상한: 카카오 1 + 메시지 1 + 인스타그램 7개는 1 + 1 + 4가 남는다.
         let kept = Orbit.capped(fullSourceEvents((1, 7, 1)))
         precondition(kept.count == 6 && kept.filter { $0.source == .instagram }.count == 4
                      && kept.contains { $0.source == .kakao } && kept.contains { $0.source == .messages }, "per-source cap")
@@ -176,7 +178,7 @@ extension PetController {
     func finishSmokeTest() {
         guard smokeBurstCount == nil, let output = smokeReport, !smokeFinishing else { return }
         smokeFinishing = true
-        // This runs after the consume already enqueued by present(), on the same serial queue.
+        // present()가 이미 넣어 둔 consume 다음에, 같은 직렬 큐에서 실행된다.
         io.async { [weak self] in
             guard let self else { return }
             let remaining = (try? self.queue?.count()) ?? -1

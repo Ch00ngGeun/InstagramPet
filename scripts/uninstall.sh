@@ -1,4 +1,6 @@
 #!/bin/bash
+# install.sh가 설치한 앱과 Chrome 브리지 등록을 지운다.
+# 실행: scripts/uninstall.sh [--delete-data]. 플래그가 없으면 로컬 큐·수신 기록·설정은 남긴다.
 set -euo pipefail
 MODE="${1:-}"
 if [[ -n "$MODE" && "$MODE" != "--delete-data" ]]; then
